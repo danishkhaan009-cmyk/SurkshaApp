@@ -1,0 +1,42 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Flutter Run Chrome",
+			"type": "shell",
+			"command": "flutter run -d chrome",
+			"isBackground": true,
+			"problemMatcher": []
+		},
+		{
+			"label": "Flutter Run Chrome",
+			"type": "shell",
+			"command": "flutter run -d chrome",
+			"isBackground": true
+		},
+		{
+			"label": "Flutter Run Chrome",
+			"type": "shell",
+			"command": "flutter run -d chrome",
+			"isBackground": true
+		},
+		{
+			"label": "Flutter Run Device",
+			"type": "shell",
+			"command": "flutter run",
+			"isBackground": true
+		},
+		{
+			"label": "Flutter Run Device",
+			"type": "shell",
+			"command": "flutter run",
+			"isBackground": true
+		},
+		{
+			"label": "Flutter Run Device",
+			"type": "shell",
+			"command": "flutter run",
+			"isBackground": true
+		}
+	]
+}

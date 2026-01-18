@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<resources>
+    <string name="app_name">without-database</string>
+    <string name="accessibility_service_description">Required for Parental Control - App Lock Feature\n\nThis accessibility service monitors when apps are opened and blocks restricted apps by showing a lock screen. It only works when child mode is active.\n\nPermissions:\n• Monitor app launches\n• Block restricted apps\n• Show lock screen\n\nYour privacy is protected - this service only activates in child mode and does not collect any personal data.</string>
+
+</resources>
