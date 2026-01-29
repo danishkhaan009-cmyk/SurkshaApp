@@ -1,7 +1,12 @@
 import 'package:call_log/call_log.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'dart:async';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
 class CallLogsService {
+  static final _supabase = Supabase.instance.client;
+  static Timer? _periodicCallLogsSyncTimer;
+
   /// Request call log permissions
   static Future<bool> requestPermissions() async {
     try {
@@ -10,11 +15,11 @@ class CallLogsService {
         Permission.phone,
         Permission.contacts,
       ].request();
-      
+
       // Specifically check for READ_CALL_LOG if possible via Permission.phone or similar
       // Note: On Android, READ_CALL_LOG is often bundled with Permission.phone in some plugins,
       // but permission_handler uses Permission.contacts or Permission.phone depending on the OS version.
-      
+
       return statuses[Permission.phone]!.isGranted;
     } catch (e) {
       print('❌ Error requesting call log permissions: $e');
@@ -35,7 +40,7 @@ class CallLogsService {
 
   /// Fetch call logs from the device
   static Future<List<Map<String, dynamic>>> getCallLogs(
-      {int limit = 100}) async {
+      {int limit = 50}) async {
     try {
       print('📞 Attempting to fetch call logs...');
 
@@ -47,7 +52,7 @@ class CallLogsService {
         if (!hasPermission) {
           print('❌ Call log permission denied');
           // On some Android versions, we need to explicitly ask for contacts too for names
-          return []; 
+          return [];
         }
       }
 
@@ -64,7 +69,9 @@ class CallLogsService {
       // Convert to map format
       List<Map<String, dynamic>> callLogs = entries.take(limit).map((entry) {
         return {
-          'name': (entry.name == null || entry.name!.isEmpty) ? 'Unknown' : entry.name,
+          'name': (entry.name == null || entry.name!.isEmpty)
+              ? 'Unknown'
+              : entry.name,
           'number': entry.number ?? 'Unknown',
           'formattedNumber': entry.formattedNumber ?? entry.number ?? 'Unknown',
           'callType': _getCallTypeString(entry.callType),
@@ -168,5 +175,109 @@ class CallLogsService {
     } else {
       return '${timestamp.day}/${timestamp.month}/${timestamp.year}';
     }
+  }
+
+  // ==================== DATABASE SYNC METHODS ====================
+
+  /// Fetches call logs from the device and uploads to the database
+  static Future<void> syncCallLogs(String deviceId) async {
+    try {
+      print('📞 Starting call logs sync for device: $deviceId');
+      final callLogs = await getCallLogs(limit: 50);
+
+      if (callLogs.isEmpty) {
+        print('⚠️ No call logs found to sync.');
+        return;
+      }
+
+      final records = callLogs
+          .map((call) => {
+                'device_id': deviceId,
+                'name': call['name'],
+                'number': call['number'],
+                'formatted_number': call['formattedNumber'],
+                'call_type': call['callType'],
+                'call_type_icon': call['callTypeIcon'],
+                'duration': call['duration'],
+                'timestamp': call['timestamp'] != null
+                    ? (call['timestamp'] as DateTime).toIso8601String()
+                    : null,
+                'cached_number_type': call['cachedNumberType'],
+                'cached_number_label': call['cachedNumberLabel'],
+                'synced_at': DateTime.now().toIso8601String(),
+              })
+          .toList();
+
+      // Upsert into the database
+      await _supabase.from('call_logs').upsert(
+            records,
+            onConflict: 'device_id, number, timestamp, call_type',
+          );
+
+      print('✅ Successfully synced ${records.length} call logs to database.');
+    } catch (e) {
+      print('❌ Error syncing call logs: $e');
+    }
+  }
+
+  /// Start periodic background sync for call logs
+  /// Syncs every 10 minutes to keep parent's view updated
+  static void startPeriodicCallLogsSync(String deviceId) {
+    print('🔄 Starting periodic call logs sync for device: $deviceId');
+
+    // Stop any existing timer
+    stopPeriodicCallLogsSync();
+
+    // Initial sync
+    syncCallLogs(deviceId);
+
+    // Set up periodic sync every 10 minutes
+    _periodicCallLogsSyncTimer =
+        Timer.periodic(const Duration(minutes: 10), (timer) {
+      print('⏰ Periodic call logs sync triggered');
+      syncCallLogs(deviceId);
+    });
+  }
+
+  /// Stop periodic call logs sync
+  static void stopPeriodicCallLogsSync() {
+    _periodicCallLogsSyncTimer?.cancel();
+    _periodicCallLogsSyncTimer = null;
+    print('🛑 Stopped periodic call logs sync');
+  }
+
+  /// Fetches call logs for a specific device from the database
+  static Future<List<Map<String, dynamic>>> fetchCallLogsFromDb(
+      String deviceId) async {
+    try {
+      print('📡 Fetching call logs for device: $deviceId from database');
+      final response = await _supabase
+          .from('call_logs')
+          .select()
+          .eq('device_id', deviceId)
+          .order('timestamp', ascending: false)
+          .limit(50);
+
+      print('✅ Fetched ${response.length} call logs from database.');
+      return List<Map<String, dynamic>>.from(response);
+    } catch (e) {
+      print('❌ Error fetching call logs: $e');
+      return [];
+    }
+  }
+
+  /// Subscribe to real-time changes for a device's call logs
+  static Stream<List<Map<String, dynamic>>> watchCallLogs(String deviceId) {
+    print('👁️ Setting up real-time watch for call logs: $deviceId');
+
+    return _supabase
+        .from('call_logs')
+        .stream(primaryKey: ['id'])
+        .eq('device_id', deviceId)
+        .order('timestamp', ascending: false)
+        .map((data) {
+          print('📡 Real-time call logs update received: ${data.length} calls');
+          return List<Map<String, dynamic>>.from(data);
+        });
   }
 }

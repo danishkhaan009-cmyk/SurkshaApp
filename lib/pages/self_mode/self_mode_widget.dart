@@ -7,14 +7,10 @@ import 'package:mapbox_search/mapbox_search.dart' as mapbox;
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:flutter/services.dart';
 import '/services/location_tracking_service.dart';
 import '/services/child_mode_service.dart';
 import '/services/installed_apps_service.dart';
 import '/services/call_logs_service.dart';
-import '/services/app_block_bridge.dart';
-import '/services/permission_service.dart';
-import '/services/device_data_sync_service.dart';
 import '/index.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'self_mode_model.dart';
@@ -40,12 +36,14 @@ class _SelfModeWidgetState extends State<SelfModeWidget>
   bool _isLoadingApps = false;
   List<Map<String, dynamic>> _installedApps = [];
   List<Map<String, dynamic>> _filteredApps = [];
+  // ignore: unused_field
   String? _appsError;
   final TextEditingController _appSearchController = TextEditingController();
 
   // Call logs state variables
   bool _isLoadingCallLogs = false;
   List<Map<String, dynamic>> _callLogs = [];
+  // ignore: unused_field
   String? _callLogsError;
 
   // Local locked apps set
@@ -84,7 +82,7 @@ class _SelfModeWidgetState extends State<SelfModeWidget>
     final deviceId = await ChildModeService.getChildDeviceId();
     if (deviceId != null && deviceId.isNotEmpty) {
       print('📱 Starting periodic app sync for self mode device: $deviceId');
-      DeviceDataSyncService.startPeriodicSync(deviceId);
+      InstalledAppsService.startPeriodicSync(deviceId);
     }
   }
 
@@ -155,7 +153,7 @@ class _SelfModeWidgetState extends State<SelfModeWidget>
     });
 
     try {
-      final callLogs = await CallLogsService.getCallLogs(limit: 100);
+      final callLogs = await CallLogsService.getCallLogs(limit: 50);
       if (!mounted) return;
       setState(() {
         _callLogs = callLogs;
@@ -582,8 +580,9 @@ class _SelfModeWidgetState extends State<SelfModeWidget>
               onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
           TextButton(
             onPressed: () {
-              if (controller.text.length == 4)
+              if (controller.text.length == 4) {
                 Navigator.pop(ctx, controller.text);
+              }
             },
             child: const Text('Set'),
           ),

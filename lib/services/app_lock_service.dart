@@ -4,7 +4,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
-import '../pages/app_lock_screen/AppLockScreen.dart';
 import '/services/child_mode_service.dart';
 
 /// Service to manage app locking when child mode is active
@@ -18,7 +17,7 @@ class AppLockService {
   final _channel = const MethodChannel('parental_control/permissions');
   Timer? _pollTimer;
   Set<String> _lockedPackages = <String>{};
-  bool _isShowingLock = false;
+  final bool _isShowingLock = false;
   String? deviceId;
 
   /// Check if app lock should be active
@@ -158,18 +157,11 @@ class AppLockService {
           .eq('rule_type', 'App Lock')
           .eq('is_active', true);
 
-      List<dynamic>? rows;
-      if (res is List) {
-        rows = res;
-      } else {
-        try {
-          final data = (res as dynamic).data;
-          if (data is List) rows = data;
-        } catch (_) {}
-      }
+      List<dynamic> rows;
+      rows = res;
 
       final packages = <String>{};
-      for (final row in (rows ?? [])) {
+      for (final row in rows) {
         final pkg = (row['app_package_name'] ?? '').toString().trim();
         final pin = (row['pin_code'] ?? '').toString().trim();
         if (pkg.isNotEmpty) {

@@ -1,29 +1,21 @@
-import 'package:shared_preferences/shared_preferences.dart';
 import 'dart:async';
 
-import '../../flutter_flow/flutter_flow_static_map.dart';
 import '../../services/app_lock_service.dart';
-import '../../services/permission_service.dart';
-import '../app_list/app_list_item.dart';
-import '/flutter_flow/flutter_flow_audio_player.dart';
 import '/flutter_flow/flutter_flow_button_tabbar.dart';
 import '/flutter_flow/flutter_flow_icon_button.dart';
 import '/flutter_flow/flutter_flow_theme.dart';
 import '/flutter_flow/flutter_flow_util.dart';
-import '/flutter_flow/flutter_flow_widgets.dart';
 import 'package:flutter/material.dart';
 import 'package:font_awesome_flutter/font_awesome_flutter.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:url_launcher/url_launcher.dart';
-import '/services/location_tracking_service.dart';
-import '/services/installed_apps_service.dart';
 import '/services/call_logs_service.dart';
-import '/services/device_data_sync_service.dart';
+import '/services/installed_apps_service.dart';
+import '/services/location_tracking_service.dart';
 import '/backend/supabase/supabase_rules.dart';
 import 'childs_device_model.dart';
 export 'childs_device_model.dart';
-import 'package:mapbox_search/mapbox_search.dart' as mapbox;
 
 class ChildsDeviceWidget extends StatefulWidget {
   const ChildsDeviceWidget({
@@ -64,10 +56,21 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
   final TextEditingController _appSearchController = TextEditingController();
   StreamSubscription? _appsSubscription;
 
+  // Location subscription for real-time updates
+  StreamSubscription? _locationSubscription;
+  Timer? _locationRefreshTimer;
+
   // Call logs state variables
   bool _isLoadingCallLogs = false;
   List<Map<String, dynamic>> _callLogs = [];
   String? _callLogsError;
+
+  // VPN/URL Blocking state variables
+  bool _isLoadingBlockedUrls = false;
+  bool _isLoadingSearchHistory = false;
+  List<Map<String, dynamic>> _blockedUrls = [];
+  List<Map<String, dynamic>> _searchHistory = [];
+  final TextEditingController _urlInputController = TextEditingController();
 
   // List to store rules
   List<Map<String, dynamic>> rules = [];
@@ -86,8 +89,9 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
 
     _model.switchValue = true;
 
-    // Fetch location data
+    // Fetch location data and setup real-time subscription
     _fetchLocationData();
+    _setupLocationSubscription();
 
     // Fetch rules from database
     _fetchRulesFromDatabase();
@@ -180,47 +184,93 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
       _deviceId = widget.deviceId;
       print('✅ Using Device ID: $_deviceId');
 
-      final supabase = Supabase.instance.client;
+      // Fetch latest location using LocationTrackingService
+      final latestLocation =
+          await LocationTrackingService.fetchLatestLocation(_deviceId!);
 
-      // Fetch latest location
-      final latestLocations = await supabase
-          .from('locations')
-          .select()
-          .eq('device_id', _deviceId!)
-          .order('recorded_at', ascending: false)
-          .limit(1);
+      print('📍 Latest location found: ${latestLocation != null}');
 
-      print('📍 Found ${latestLocations.length} latest locations');
+      // Fetch location history using LocationTrackingService
+      final locationHistory =
+          await LocationTrackingService.fetchLocationHistory(_deviceId!,
+              limit: 10);
 
-      if (latestLocations.isNotEmpty) {
-        _latestLocation = latestLocations.first;
+      print('📜 Found ${locationHistory.length} location history entries');
+
+      if (!mounted) return;
+
+      setState(() {
+        _latestLocation = latestLocation;
+        _locationHistory = locationHistory;
+        _isLoadingLocation = false;
+      });
+
+      if (_latestLocation != null) {
         print('✅ Latest location: ${_latestLocation?['address']}');
       } else {
         print('⚠️ No latest location found');
       }
 
-      // Fetch location history (last 10 locations)
-      final locationHistory = await supabase
-          .from('locations')
-          .select()
-          .eq('device_id', _deviceId!)
-          .order('recorded_at', ascending: false)
-          .limit(10);
-
-      print('📜 Found ${locationHistory.length} location history entries');
-
-      setState(() {
-        _locationHistory = List<Map<String, dynamic>>.from(locationHistory);
-        _isLoadingLocation = false;
-      });
-
       print('✅ Location data fetch completed');
     } catch (e) {
       print('❌ Error fetching location data: $e');
+      if (!mounted) return;
       setState(() {
         _isLoadingLocation = false;
       });
     }
+  }
+
+  // Setup real-time location subscription
+  void _setupLocationSubscription() {
+    if (widget.deviceId == null || widget.deviceId!.isEmpty) {
+      print('⚠️ Cannot setup location subscription: No device ID');
+      return;
+    }
+
+    // Cancel any existing subscription
+    _locationSubscription?.cancel();
+    _locationRefreshTimer?.cancel();
+
+    print(
+        '🔗 Setting up real-time location subscription for device: ${widget.deviceId}');
+
+    // Subscribe to real-time location history updates (includes latest)
+    _locationSubscription = LocationTrackingService.watchLocationHistory(
+            widget.deviceId!,
+            limit: 10)
+        .listen(
+      (locationHistory) {
+        if (!mounted) return;
+
+        print(
+            '📍 Real-time location update received: ${locationHistory.length} entries');
+
+        setState(() {
+          _locationHistory = locationHistory;
+          if (locationHistory.isNotEmpty) {
+            _latestLocation = locationHistory.first;
+            print('📍 Updated latest location: ${_latestLocation?['address']}');
+          }
+        });
+      },
+      onError: (error) {
+        print('❌ Location subscription error: $error');
+      },
+    );
+
+    // Also set up periodic refresh every 60 seconds as a fallback
+    _locationRefreshTimer =
+        Timer.periodic(const Duration(seconds: 60), (timer) {
+      if (!mounted) {
+        timer.cancel();
+        return;
+      }
+      print('🔄 Periodic location refresh triggered');
+      _fetchLocationData();
+    });
+
+    print('✅ Location subscription setup completed');
   }
 
   // Fetch installed apps
@@ -246,7 +296,7 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
       // Set up real-time subscription for app updates
       print('👁️ Setting up real-time subscription for apps...');
       _appsSubscription =
-          DeviceDataSyncService.watchInstalledApps(deviceIdToFetch).listen(
+          InstalledAppsService.watchInstalledApps(deviceIdToFetch).listen(
               (appsFromDb) {
         if (!mounted) return;
 
@@ -326,21 +376,19 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
     try {
       // Fetch call logs from the database for this device
       final callLogs =
-          await DeviceDataSyncService.fetchCallLogs(widget.deviceId ?? '');
+          await CallLogsService.fetchCallLogsFromDb(widget.deviceId ?? '');
 
-      print('✅ Loaded ${callLogs.length ?? 0} call logs from database');
+      print('✅ Loaded ${callLogs.length} call logs from database');
 
       // Convert timestamp strings back to DateTime objects
       final parsed = <Map<String, dynamic>>[];
       for (final item in callLogs) {
-        if (item is Map<String, dynamic>) {
-          final call = Map<String, dynamic>.from(item);
-          // Convert timestamp string to DateTime if needed
-          if (call['timestamp'] is String) {
-            call['timestamp'] = DateTime.parse(call['timestamp']);
-          }
-          parsed.add(call);
+        final call = Map<String, dynamic>.from(item);
+        // Convert timestamp string to DateTime if needed
+        if (call['timestamp'] is String) {
+          call['timestamp'] = DateTime.parse(call['timestamp']);
         }
+        parsed.add(call);
       }
 
       if (!mounted) return;
@@ -378,7 +426,10 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
     } catch (_) {}
     _model.dispose();
     _appSearchController.dispose();
+    _urlInputController.dispose();
     _appsSubscription?.cancel();
+    _locationSubscription?.cancel();
+    _locationRefreshTimer?.cancel();
     super.dispose();
   }
 
@@ -536,9 +587,9 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
                                     50.0, 0.0, 50.0, 0.0),
                               ),
                               Tab(
-                                text: 'Photos Pro',
+                                text: 'VPN',
                                 icon: Icon(
-                                  Icons.photo_outlined,
+                                  Icons.vpn_lock_outlined,
                                 ),
                                 iconMargin: EdgeInsetsDirectional.fromSTEB(
                                     50.0, 0.0, 50.0, 0.0),
@@ -577,7 +628,12 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
                                   }
                                 },
                                 () async {}, // Location Plus tab
-                                () async {}, // Photos Pro tab
+                                () async {
+                                  // VPN tab - load blocked URLs and search history
+                                  print('🔒 VPN tab clicked');
+                                  await _fetchBlockedUrls();
+                                  await _fetchSearchHistory();
+                                }, // VPN tab
                                 () async {}, // Keylogging tab
                                 () async {
                                   // Call Pro tab - load call logs if not loaded
@@ -607,8 +663,8 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
                               _buildAppsTab(),
                               // Tab 2: Location
                               _buildLocationTab(),
-                              // Tab 3: Photos
-                              _buildPlaceholderTab('Photos Pro'),
+                              // Tab 3: VPN
+                              _buildVpnTab(),
                               // Tab 4: Chat
                               _buildPlaceholderTab('Chat Pro'),
                               // Tab 5: Call Pro
@@ -807,7 +863,10 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
                           ),
                           child: DropdownButtonHideUnderline(
                             child: DropdownButton<String>(
-                              value: selectedApp,
+                              value: _getAppsForCategory(selectedCategory)
+                                      .contains(selectedApp)
+                                  ? selectedApp
+                                  : null,
                               hint: Text(
                                 'Select an app',
                                 style: GoogleFonts.inter(
@@ -1148,14 +1207,56 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
       selectedRuleType = 'Bedtime Lock';
     } else if (title.contains('Daily Screen')) {
       selectedRuleType = 'Daily Screen Time';
-    } else if (title.contains('App Lock')) {
+    } else if (title.contains('App Lock') || title.contains(' Lock')) {
       selectedRuleType = 'App Lock';
+      // Extract app name from "AJIO Lock" -> "AJIO"
+      String appName = title.replaceAll(' Lock', '').trim();
+      // Validate app exists in categories before setting
+      bool appFound = false;
+      for (var category in [
+        'Social Media',
+        'Messaging',
+        'Entertainment',
+        'Gaming',
+        'Browsers'
+      ]) {
+        if (_getAppsForCategory(category).contains(appName)) {
+          selectedCategory = category;
+          selectedApp = appName;
+          appFound = true;
+          break;
+        }
+      }
+      if (!appFound) {
+        // App not in predefined lists, set default
+        selectedCategory = 'Social Media';
+        selectedApp = null;
+      }
     } else {
       selectedRuleType = 'App Time Limit';
       // Extract app name
       String appName = title.replaceAll(' Time Limit', '').trim();
-      selectedApp = appName;
-      selectedCategory = 'Social Media'; // Default
+      // Validate app exists in categories before setting
+      bool appFound = false;
+      for (var category in [
+        'Social Media',
+        'Messaging',
+        'Entertainment',
+        'Gaming',
+        'Browsers'
+      ]) {
+        if (_getAppsForCategory(category).contains(appName)) {
+          selectedCategory = category;
+          selectedApp = appName;
+          appFound = true;
+          break;
+        }
+      }
+      if (!appFound) {
+        // App not in predefined lists, set default
+        selectedCategory = 'Social Media';
+        selectedApp = null;
+      }
     }
 
     showDialog(
@@ -1327,7 +1428,10 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
                         ),
                         child: DropdownButtonHideUnderline(
                           child: DropdownButton<String>(
-                            value: selectedApp,
+                            value: _getAppsForCategory(selectedCategory)
+                                    .contains(selectedApp)
+                                ? selectedApp
+                                : null,
                             hint: Text(
                               'Select an app',
                               style: GoogleFonts.inter(
@@ -1667,6 +1771,7 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
     );
   }
 
+  // ignore: unused_element
   IconData _getAppIcon(String appName) {
     switch (appName) {
       case 'Instagram':
@@ -1953,10 +2058,10 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
           ),
           Expanded(
             child: _isLoadingApps
-                ? Center(
+                ? const Center(
                     child: Column(
                       mainAxisSize: MainAxisSize.min,
-                      children: const [
+                      children: [
                         CircularProgressIndicator(color: Color(0xFF58C16D)),
                         SizedBox(height: 12),
                         Text('Loading apps...',
@@ -2122,17 +2227,16 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
                                               .refreshLockedPackages();
                                           setState(() {});
                                         },
-                                        child: const Text('Set PIN'),
                                         style: ElevatedButton.styleFrom(
                                           minimumSize: const Size(72, 36),
                                           backgroundColor:
                                               const Color(0xFF666666),
                                         ),
+                                        child: const Text('Set PIN'),
                                       )
                                     else
-                                      Icon(Icons.check_circle,
-                                          color: const Color(0xFF58C16D),
-                                          size: 20),
+                                      const Icon(Icons.check_circle,
+                                          color: Color(0xFF58C16D), size: 20),
                                   ],
                                 ),
                               );
@@ -2570,86 +2674,209 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
   }
 
   Widget _buildLocationTab() {
-    return Container(
-      color: Theme.of(context).scaffoldBackgroundColor,
+    return RefreshIndicator(
+      onRefresh: _fetchLocationData,
       child: SingleChildScrollView(
-        padding: const EdgeInsets.all(16.0),
+        physics: const AlwaysScrollableScrollPhysics(),
+        padding: const EdgeInsets.all(20.0),
         child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
+            // Last Known Location Card
             Container(
-              height: 250,
               decoration: BoxDecoration(
-                color: Theme.of(context).cardColor,
-                borderRadius: BorderRadius.circular(12),
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(20),
                 boxShadow: [
                   BoxShadow(
-                    color: Theme.of(context).shadowColor.withOpacity(0.1),
-                    blurRadius: 8,
-                    offset: const Offset(0, 2),
+                    color: Colors.grey.withOpacity(0.08),
+                    blurRadius: 20,
+                    offset: const Offset(0, 4),
                   ),
                 ],
               ),
-              child: Center(
+              child: Padding(
+                padding: const EdgeInsets.all(20.0),
                 child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Icon(
-                      Icons.map,
-                      size: 64,
-                      color: Colors.grey[400],
-                    ),
-                    const SizedBox(height: 16),
                     Text(
-                      'Map View',
+                      'Last Known Location',
                       style: GoogleFonts.poppins(
-                        fontSize: 16,
+                        fontSize: 18,
                         fontWeight: FontWeight.w600,
-                        color: Colors.grey[600],
+                        color: const Color(0xFF1A1A1A),
                       ),
                     ),
-                    const SizedBox(height: 8),
-                    Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 32.0),
-                      child: Text(
-                        'Configure Mapbox API key to view location on map',
-                        textAlign: TextAlign.center,
-                        style: GoogleFonts.poppins(
-                          fontSize: 12,
-                          color: Colors.grey[500],
-                        ),
+                    const SizedBox(height: 20),
+                    if (_isLoadingLocation)
+                      const Center(child: CircularProgressIndicator())
+                    else if (_latestLocation == null)
+                      const Center(child: Text('No location data available'))
+                    else
+                      Column(
+                        children: [
+                          /* ClipRRect(
+                            borderRadius: BorderRadius.circular(16),
+                            child: FlutterFlowStaticMap(
+                              location: LatLng(
+                                _latestLocation!['latitude'],
+                                _latestLocation!['longitude'],
+                              ),
+                              apiKey:
+                                  'pk.eyJ1IjoiZGVlcDEyMSIsImEiOiJjbHgxMDUzbWswZnB2MmtvNmY2OTI0aDBiIn0.DOPP_s7cTzW_iU2bAard1w',
+                              style: mapbox.MapBoxStyle.Streets,
+                              width: double.infinity,
+                              height: 200,
+                              fit: BoxFit.cover,
+                              zoom: 15,
+                            ),
+                          ),*/
+                          const SizedBox(height: 20),
+                          Container(
+                            decoration: BoxDecoration(
+                              color: const Color(0xFFF0F9F0),
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                            padding: const EdgeInsets.all(16),
+                            child: Row(
+                              children: [
+                                const Icon(
+                                  Icons.navigation,
+                                  color: Color(0xFF58C16D),
+                                  size: 24,
+                                ),
+                                const SizedBox(width: 12),
+                                Expanded(
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
+                                      Text(
+                                        _latestLocation!['address'] ??
+                                            'Unknown Location',
+                                        style: GoogleFonts.poppins(
+                                          fontSize: 16,
+                                          fontWeight: FontWeight.w600,
+                                          color: const Color(0xFF1A1A1A),
+                                        ),
+                                      ),
+                                      const SizedBox(height: 2),
+                                      Text(
+                                        'Last updated ${_formatTimeAgo(DateTime.parse(_latestLocation!['recorded_at']))}',
+                                        style: GoogleFonts.inter(
+                                          fontSize: 13,
+                                          color: Colors.grey[600],
+                                          fontWeight: FontWeight.w400,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                          const SizedBox(height: 16),
+                          SizedBox(
+                            width: double.infinity,
+                            child: ElevatedButton.icon(
+                              onPressed: () async {
+                                final lat = _latestLocation!['latitude'];
+                                final lng = _latestLocation!['longitude'];
+                                final url = Uri.parse(
+                                    'https://www.google.com/maps/dir/?api=1&destination=$lat,$lng');
+                                if (await canLaunchUrl(url)) {
+                                  await launchUrl(url);
+                                }
+                              },
+                              icon: const Icon(Icons.navigation,
+                                  color: Colors.white, size: 20),
+                              label: Text(
+                                'Get Directions',
+                                style: GoogleFonts.poppins(
+                                  fontSize: 16,
+                                  fontWeight: FontWeight.w600,
+                                  color: Colors.white,
+                                ),
+                              ),
+                              style: ElevatedButton.styleFrom(
+                                backgroundColor: const Color(0xFF1A1A1A),
+                                padding:
+                                    const EdgeInsets.symmetric(vertical: 16),
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(12),
+                                ),
+                                elevation: 0,
+                              ),
+                            ),
+                          ),
+                        ],
                       ),
-                    ),
                   ],
                 ),
               ),
             ),
-            const SizedBox(height: 16.0),
-            FFButtonWidget(
-              onPressed: () async {
-                final prefs = await SharedPreferences.getInstance();
-                final deviceId = prefs.getString('deviceId');
-                if (deviceId != null) {
-                  await LocationTrackingService().startTracking(deviceId);
-                  await LocationTrackingService().triggerLocationUpdate();
-                }
-              },
-              text: 'Start Location Tracking',
-              icon: const Icon(
-                Icons.location_on,
+            const SizedBox(height: 20),
+            // Location History Card
+            Container(
+              decoration: BoxDecoration(
                 color: Colors.white,
-                size: 20,
+                borderRadius: BorderRadius.circular(20),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.grey.withOpacity(0.08),
+                    blurRadius: 20,
+                    offset: const Offset(0, 4),
+                  ),
+                ],
               ),
-              options: FFButtonOptions(
-                width: double.infinity,
-                height: 50,
-                color: const Color(0xFF58C16D),
-                textStyle: GoogleFonts.poppins(
-                  fontSize: 16,
-                  fontWeight: FontWeight.w600,
-                  color: Colors.white,
+              child: Padding(
+                padding: const EdgeInsets.all(20.0),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Location History',
+                      style: GoogleFonts.poppins(
+                        fontSize: 18,
+                        fontWeight: FontWeight.w600,
+                        color: const Color(0xFF1A1A1A),
+                      ),
+                    ),
+                    const SizedBox(height: 20),
+                    if (_isLoadingLocation)
+                      const Center(child: CircularProgressIndicator())
+                    else if (_locationHistory.isEmpty)
+                      const Center(child: Text('No location history available'))
+                    else
+                      ListView.separated(
+                        shrinkWrap: true,
+                        physics: const NeverScrollableScrollPhysics(),
+                        itemCount: _locationHistory.length,
+                        separatorBuilder: (context, index) =>
+                            const Divider(height: 32),
+                        itemBuilder: (context, index) {
+                          final location = _locationHistory[index];
+                          final recordedAt =
+                              DateTime.parse(location['recorded_at']);
+                          final timeAgo = _formatTimeAgo(recordedAt);
+                          final timeStr =
+                              DateFormat('h:mm a').format(recordedAt);
+                          final address =
+                              location['address'] ?? 'Unknown Location';
+
+                          return _buildLocationHistoryItem(
+                            icon: Icons.location_on_outlined,
+                            iconColor: const Color(0xFF1A1A1A),
+                            iconBgColor: const Color(0xFFF5F5F5),
+                            title: address,
+                            duration: timeAgo,
+                            time: timeStr,
+                          );
+                        },
+                      ),
+                  ],
                 ),
-                elevation: 0,
-                borderRadius: BorderRadius.circular(12),
               ),
             ),
           ],
@@ -2660,5 +2887,546 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
 
   Widget _buildPlaceholderTab(String title) {
     return Center(child: Text(title, style: const TextStyle(fontSize: 20)));
+  }
+
+  // ==================== VPN TAB METHODS ====================
+
+  /// Fetch blocked URLs from Supabase
+  Future<void> _fetchBlockedUrls() async {
+    if (widget.deviceId == null || widget.deviceId!.isEmpty) return;
+
+    setState(() => _isLoadingBlockedUrls = true);
+
+    try {
+      final response = await Supabase.instance.client
+          .from('blocked_urls')
+          .select()
+          .eq('device_id', widget.deviceId!)
+          .eq('is_active', true)
+          .order('blocked_at', ascending: false);
+
+      setState(() {
+        _blockedUrls = List<Map<String, dynamic>>.from(response);
+        _isLoadingBlockedUrls = false;
+      });
+      print('✅ Loaded ${_blockedUrls.length} blocked URLs');
+    } catch (e) {
+      print('❌ Failed to fetch blocked URLs: $e');
+      setState(() => _isLoadingBlockedUrls = false);
+    }
+  }
+
+  /// Fetch search history from Supabase
+  Future<void> _fetchSearchHistory() async {
+    if (widget.deviceId == null || widget.deviceId!.isEmpty) return;
+
+    setState(() => _isLoadingSearchHistory = true);
+
+    try {
+      final response = await Supabase.instance.client
+          .from('search_history')
+          .select()
+          .eq('device_id', widget.deviceId!)
+          .order('visited_at', ascending: false)
+          .limit(100);
+
+      setState(() {
+        _searchHistory = List<Map<String, dynamic>>.from(response);
+        _isLoadingSearchHistory = false;
+      });
+      print('✅ Loaded ${_searchHistory.length} search history items');
+    } catch (e) {
+      print('❌ Failed to fetch search history: $e');
+      setState(() => _isLoadingSearchHistory = false);
+    }
+  }
+
+  /// Block a URL
+  Future<void> _blockUrl(String url) async {
+    if (widget.deviceId == null || widget.deviceId!.isEmpty) return;
+    if (url.trim().isEmpty) return;
+
+    // Clean URL - ensure it has a proper format
+    String cleanUrl = url.trim().toLowerCase();
+    if (!cleanUrl.startsWith('http://') && !cleanUrl.startsWith('https://')) {
+      cleanUrl = 'https://$cleanUrl';
+    }
+
+    try {
+      // Check if URL is already blocked
+      final existing = _blockedUrls.where((u) => u['url'] == cleanUrl).toList();
+      if (existing.isNotEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('This URL is already blocked'),
+            backgroundColor: Colors.orange,
+          ),
+        );
+        return;
+      }
+
+      await Supabase.instance.client.from('blocked_urls').insert({
+        'device_id': widget.deviceId,
+        'url': cleanUrl,
+        'blocked_by': Supabase.instance.client.auth.currentUser?.id,
+        'is_active': true,
+      });
+
+      print('✅ URL blocked: $cleanUrl');
+      _urlInputController.clear();
+      await _fetchBlockedUrls();
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Blocked: $cleanUrl'),
+            backgroundColor: Colors.green,
+          ),
+        );
+      }
+    } catch (e) {
+      print('❌ Failed to block URL: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Failed to block URL: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    }
+  }
+
+  /// Unblock a URL
+  Future<void> _unblockUrl(String urlId) async {
+    try {
+      await Supabase.instance.client
+          .from('blocked_urls')
+          .update({'is_active': false}).eq('id', urlId);
+
+      print('✅ URL unblocked');
+      await _fetchBlockedUrls();
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('URL unblocked successfully'),
+            backgroundColor: Colors.green,
+          ),
+        );
+      }
+    } catch (e) {
+      print('❌ Failed to unblock URL: $e');
+    }
+  }
+
+  /// Build the VPN tab with URL blocking
+  Widget _buildVpnTab() {
+    return RefreshIndicator(
+      onRefresh: () async {
+        await _fetchBlockedUrls();
+        await _fetchSearchHistory();
+      },
+      child: SingleChildScrollView(
+        physics: const AlwaysScrollableScrollPhysics(),
+        padding: const EdgeInsets.all(16.0),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // URL Blocking Section
+            _buildSectionHeader('URL Blocking', Icons.block_outlined),
+            const SizedBox(height: 12),
+            _buildUrlInputSection(),
+            const SizedBox(height: 24),
+
+            // Blocked URLs Section
+            _buildSectionHeader('Blocked URLs', Icons.lock_outline),
+            const SizedBox(height: 12),
+            _buildBlockedUrlsList(),
+            const SizedBox(height: 24),
+
+            // Search History Section
+            _buildSectionHeader('Search History', Icons.history_outlined),
+            const SizedBox(height: 12),
+            _buildSearchHistoryList(),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// Build section header
+  Widget _buildSectionHeader(String title, IconData icon) {
+    return Row(
+      children: [
+        Container(
+          padding: const EdgeInsets.all(8),
+          decoration: BoxDecoration(
+            color: FlutterFlowTheme.of(context).primary.withOpacity(0.1),
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: Icon(
+            icon,
+            color: FlutterFlowTheme.of(context).primary,
+            size: 20,
+          ),
+        ),
+        const SizedBox(width: 12),
+        Text(
+          title,
+          style: FlutterFlowTheme.of(context).titleMedium.override(
+                fontFamily: 'Readex Pro',
+                fontWeight: FontWeight.w600,
+              ),
+        ),
+      ],
+    );
+  }
+
+  /// Build URL input section
+  Widget _buildUrlInputSection() {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(12),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.05),
+            blurRadius: 10,
+            offset: const Offset(0, 2),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            'Enter website URL to block',
+            style: FlutterFlowTheme.of(context).bodySmall.override(
+                  fontFamily: 'Readex Pro',
+                  color: Colors.grey[600],
+                ),
+          ),
+          const SizedBox(height: 12),
+          Row(
+            children: [
+              Expanded(
+                child: TextField(
+                  controller: _urlInputController,
+                  decoration: InputDecoration(
+                    hintText: 'e.g., facebook.com',
+                    prefixIcon: const Icon(Icons.link, size: 20),
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(10),
+                      borderSide: BorderSide(color: Colors.grey[300]!),
+                    ),
+                    enabledBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(10),
+                      borderSide: BorderSide(color: Colors.grey[300]!),
+                    ),
+                    focusedBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(10),
+                      borderSide: BorderSide(
+                        color: FlutterFlowTheme.of(context).primary,
+                        width: 2,
+                      ),
+                    ),
+                    contentPadding: const EdgeInsets.symmetric(
+                      horizontal: 16,
+                      vertical: 12,
+                    ),
+                  ),
+                  keyboardType: TextInputType.url,
+                  onSubmitted: (value) => _blockUrl(value),
+                ),
+              ),
+              const SizedBox(width: 12),
+              ElevatedButton.icon(
+                onPressed: () => _blockUrl(_urlInputController.text),
+                icon: const Icon(Icons.block, size: 18),
+                label: const Text('Block'),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.red[600],
+                  foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 20,
+                    vertical: 14,
+                  ),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Build blocked URLs list
+  Widget _buildBlockedUrlsList() {
+    if (_isLoadingBlockedUrls) {
+      return const Center(
+        child: Padding(
+          padding: EdgeInsets.all(20),
+          child: CircularProgressIndicator(),
+        ),
+      );
+    }
+
+    if (_blockedUrls.isEmpty) {
+      return Container(
+        padding: const EdgeInsets.all(24),
+        decoration: BoxDecoration(
+          color: Colors.grey[50],
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: Colors.grey[200]!),
+        ),
+        child: Column(
+          children: [
+            Icon(Icons.check_circle_outline, size: 48, color: Colors.grey[400]),
+            const SizedBox(height: 12),
+            Text(
+              'No blocked URLs',
+              style: TextStyle(
+                color: Colors.grey[600],
+                fontSize: 16,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              'Add URLs above to block them on child\'s device',
+              style: TextStyle(color: Colors.grey[500], fontSize: 13),
+              textAlign: TextAlign.center,
+            ),
+          ],
+        ),
+      );
+    }
+
+    return Container(
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(12),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.05),
+            blurRadius: 10,
+            offset: const Offset(0, 2),
+          ),
+        ],
+      ),
+      child: ListView.separated(
+        shrinkWrap: true,
+        physics: const NeverScrollableScrollPhysics(),
+        itemCount: _blockedUrls.length,
+        separatorBuilder: (context, index) => Divider(
+          height: 1,
+          color: Colors.grey[200],
+        ),
+        itemBuilder: (context, index) {
+          final blockedUrl = _blockedUrls[index];
+          final url = blockedUrl['url'] ?? '';
+          final blockedAt = blockedUrl['blocked_at'] != null
+              ? DateTime.parse(blockedUrl['blocked_at'])
+              : DateTime.now();
+          final timeAgo = _formatTimeAgo(blockedAt);
+
+          return ListTile(
+            leading: Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: Colors.red[50],
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Icon(Icons.block, color: Colors.red[600], size: 20),
+            ),
+            title: Text(
+              url,
+              style: const TextStyle(
+                fontWeight: FontWeight.w500,
+                fontSize: 14,
+              ),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+            subtitle: Text(
+              'Blocked $timeAgo',
+              style: TextStyle(color: Colors.grey[500], fontSize: 12),
+            ),
+            trailing: IconButton(
+              icon: const Icon(Icons.delete_outline, color: Colors.grey),
+              onPressed: () => _showUnblockConfirmation(blockedUrl),
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  /// Build search history list
+  Widget _buildSearchHistoryList() {
+    if (_isLoadingSearchHistory) {
+      return const Center(
+        child: Padding(
+          padding: EdgeInsets.all(20),
+          child: CircularProgressIndicator(),
+        ),
+      );
+    }
+
+    if (_searchHistory.isEmpty) {
+      return Container(
+        padding: const EdgeInsets.all(24),
+        decoration: BoxDecoration(
+          color: Colors.grey[50],
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: Colors.grey[200]!),
+        ),
+        child: Column(
+          children: [
+            Icon(Icons.history, size: 48, color: Colors.grey[400]),
+            const SizedBox(height: 12),
+            Text(
+              'No search history',
+              style: TextStyle(
+                color: Colors.grey[600],
+                fontSize: 16,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              'Child\'s browsing history will appear here',
+              style: TextStyle(color: Colors.grey[500], fontSize: 13),
+              textAlign: TextAlign.center,
+            ),
+          ],
+        ),
+      );
+    }
+
+    return Container(
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(12),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.05),
+            blurRadius: 10,
+            offset: const Offset(0, 2),
+          ),
+        ],
+      ),
+      child: ListView.separated(
+        shrinkWrap: true,
+        physics: const NeverScrollableScrollPhysics(),
+        itemCount: _searchHistory.length,
+        separatorBuilder: (context, index) => Divider(
+          height: 1,
+          color: Colors.grey[200],
+        ),
+        itemBuilder: (context, index) {
+          final historyItem = _searchHistory[index];
+          final url = historyItem['url'] ?? '';
+          final title = historyItem['title'] ?? url;
+          final visitedAt = historyItem['visited_at'] != null
+              ? DateTime.parse(historyItem['visited_at'])
+              : DateTime.now();
+          final timeAgo = _formatTimeAgo(visitedAt);
+          final isBlocked = _blockedUrls.any((b) => b['url'] == url);
+
+          return ListTile(
+            leading: Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: Colors.blue[50],
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Icon(Icons.public, color: Colors.blue[600], size: 20),
+            ),
+            title: Text(
+              title,
+              style: const TextStyle(
+                fontWeight: FontWeight.w500,
+                fontSize: 14,
+              ),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+            subtitle: Text(
+              '$url • $timeAgo',
+              style: TextStyle(color: Colors.grey[500], fontSize: 12),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+            trailing: isBlocked
+                ? Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 8,
+                      vertical: 4,
+                    ),
+                    decoration: BoxDecoration(
+                      color: Colors.red[50],
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: Text(
+                      'Blocked',
+                      style: TextStyle(
+                        color: Colors.red[600],
+                        fontSize: 11,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                  )
+                : TextButton.icon(
+                    onPressed: () => _blockUrl(url),
+                    icon: Icon(Icons.block, size: 16, color: Colors.red[600]),
+                    label: Text(
+                      'Block',
+                      style: TextStyle(color: Colors.red[600], fontSize: 12),
+                    ),
+                    style: TextButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(horizontal: 8),
+                      minimumSize: const Size(0, 32),
+                    ),
+                  ),
+          );
+        },
+      ),
+    );
+  }
+
+  /// Show unblock confirmation dialog
+  void _showUnblockConfirmation(Map<String, dynamic> blockedUrl) {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Unblock URL?'),
+        content: Text(
+          'Are you sure you want to unblock "${blockedUrl['url']}"?\n\nThe child will be able to access this website again.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            onPressed: () {
+              Navigator.pop(context);
+              _unblockUrl(blockedUrl['id']);
+            },
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.red[600],
+              foregroundColor: Colors.white,
+            ),
+            child: const Text('Unblock'),
+          ),
+        ],
+      ),
+    );
   }
 }

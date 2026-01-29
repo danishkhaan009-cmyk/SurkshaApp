@@ -3,6 +3,8 @@ import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '/services/auth_service.dart';
+import '/services/self_mode_service.dart';
+import '/services/child_mode_service.dart';
 import 'settings_model.dart';
 export 'settings_model.dart';
 
@@ -222,8 +224,16 @@ class _SettingsWidgetState extends State<SettingsWidget> {
                   SizedBox(
                     width: double.infinity,
                     child: ElevatedButton(
-                      onPressed: () {
-                        context.pushNamed('Login_Screen');
+                      onPressed: () async {
+                        // Clear all mode states
+                        await SelfModeService.deactivateSelfMode();
+                        await ChildModeService.deactivateChildMode();
+                        // Sign out from Supabase
+                        await AuthService.signOut();
+                        // Navigate to login screen
+                        if (context.mounted) {
+                          context.goNamed('Login_Screen');
+                        }
                       },
                       style: ElevatedButton.styleFrom(
                         backgroundColor: Colors.white,

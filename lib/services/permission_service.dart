@@ -212,8 +212,7 @@ class PermissionService {
       builder: (c) => AlertDialog(
         title: const Text('Permissions required'),
         content: Text(
-          'The app needs the following permissions to enforce app locks:\n\n' +
-              missing.join('\n'),
+          'The app needs the following permissions to enforce app locks:\n\n${missing.join('\n')}',
         ),
         actions: [
           TextButton(

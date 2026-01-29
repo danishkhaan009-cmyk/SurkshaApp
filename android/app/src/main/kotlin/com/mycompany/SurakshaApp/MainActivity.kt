@@ -23,6 +23,9 @@ import android.os.IBinder
 import android.util.Log
 import android.text.TextUtils
 import android.app.AppOpsManager
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 
 class MainActivity: FlutterActivity() {
     private val TAG = "MainActivity"
@@ -112,6 +115,74 @@ class MainActivity: FlutterActivity() {
                 "stopMonitoringService" -> {
                     MonitoringService.stop(applicationContext)
                     result.success(true)
+                }
+                // Location Service Methods for persistent background tracking
+                "startLocationService" -> {
+                    val deviceId = call.argument<String>("deviceId")
+                    val supabaseUrl = call.argument<String>("supabaseUrl")
+                    val supabaseKey = call.argument<String>("supabaseKey")
+                    if (deviceId != null && supabaseUrl != null && supabaseKey != null) {
+                        LocationService.start(applicationContext, deviceId, supabaseUrl, supabaseKey)
+                        result.success(true)
+                    } else {
+                        result.error("INVALID_ARGS", "deviceId, supabaseUrl, and supabaseKey are required", null)
+                    }
+                }
+                "stopLocationService" -> {
+                    LocationService.stop(applicationContext)
+                    result.success(true)
+                }
+                "isLocationServiceRunning" -> {
+                    result.success(LocationService.isRunning(applicationContext))
+                }
+                "getLocationServiceDeviceId" -> {
+                    result.success(LocationService.getDeviceId(applicationContext))
+                }
+                "requestBatteryOptimizationExemption" -> {
+                    requestBatteryOptimizationExemption()
+                    result.success(true)
+                }
+                "isBatteryOptimizationDisabled" -> {
+                    result.success(isBatteryOptimizationDisabled())
+                }
+                "requestBackgroundLocationPermission" -> {
+                    openBackgroundLocationSettings()
+                    result.success(true)
+                }
+                "scheduleLocationWorker" -> {
+                    LocationWorker.schedulePeriodicWork(applicationContext)
+                    result.success(true)
+                }
+                "cancelLocationWorker" -> {
+                    LocationWorker.cancelPeriodicWork(applicationContext)
+                    result.success(true)
+                }
+                "isLocationWorkerScheduled" -> {
+                    // Use coroutine to call suspend function
+                    CoroutineScope(Dispatchers.IO).launch {
+                        try {
+                            val isScheduled = LocationWorker.isWorkScheduled(applicationContext)
+                            runOnUiThread {
+                                result.success(isScheduled)
+                            }
+                        } catch (e: Exception) {
+                            runOnUiThread {
+                                result.success(false)
+                            }
+                        }
+                    }
+                }
+                "syncDeviceId" -> {
+                    // Sync device ID from Flutter to native SharedPreferences for LocationWorker
+                    val deviceId = call.argument<String>("deviceId")
+                    if (deviceId != null) {
+                        val prefs = getSharedPreferences("location_service_prefs", Context.MODE_PRIVATE)
+                        prefs.edit().putString("device_id", deviceId).apply()
+                        Log.d(TAG, "✅ Device ID synced to native: $deviceId")
+                        result.success(true)
+                    } else {
+                        result.error("INVALID_ARGS", "deviceId is required", null)
+                    }
                 }
                 else -> result.notImplemented()
             }
@@ -239,6 +310,32 @@ class MainActivity: FlutterActivity() {
             Settings.canDrawOverlays(this)
         } else {
             true
+        }
+    }
+
+    private fun requestBatteryOptimizationExemption() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
+            intent.data = Uri.parse("package:$packageName")
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            startActivity(intent)
+        }
+    }
+
+    private fun isBatteryOptimizationDisabled(): Boolean {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            val powerManager = getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
+            return powerManager.isIgnoringBatteryOptimizations(packageName)
+        }
+        return true
+    }
+
+    private fun openBackgroundLocationSettings() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
+            intent.data = Uri.parse("package:$packageName")
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            startActivity(intent)
         }
     }
 }

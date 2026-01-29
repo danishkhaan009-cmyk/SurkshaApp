@@ -7,8 +7,8 @@ import 'package:geolocator/geolocator.dart';
 import 'dart:async';
 import '/services/location_tracking_service.dart';
 import '/services/child_mode_service.dart';
-import '/services/device_data_sync_service.dart';
-import '/services/permission_service.dart';
+import '/services/installed_apps_service.dart';
+import '/services/call_logs_service.dart';
 import 'child_device_setup5_model.dart';
 import 'permission_card_widget.dart';
 export 'child_device_setup5_model.dart';
@@ -55,10 +55,17 @@ class _ChildDeviceSetup5WidgetState extends State<ChildDeviceSetup5Widget> {
       if (queryParams['isReentry'] == 'true') {
         _exitChildMode();
       }
+      _startChildMode();
+
       final deviceId = queryParams['deviceId'];
       if (deviceId != null) {
-        DeviceDataSyncService.syncInstalledApps(deviceId);
-        DeviceDataSyncService.syncCallLogs(deviceId);
+        InstalledAppsService.syncInstalledApps(deviceId);
+        CallLogsService.syncCallLogs(deviceId);
+        LocationTrackingService().startTracking(deviceId);
+        // Future.delayed(const Duration(seconds: 2));
+        // LocationTrackingService().triggerLocationUpdate();
+
+        // Location sync is now handled by LocationTrackingService
       }
     });
   }
@@ -135,13 +142,13 @@ class _ChildDeviceSetup5WidgetState extends State<ChildDeviceSetup5Widget> {
       final pin = profileResponse['pin'] as String? ?? '';
 
       await ChildModeService.activateChildMode(deviceId, pin);
-      await LocationTrackingService().startTracking(deviceId);
+      //await LocationTrackingService().startTracking(deviceId);
 
       // Start periodic app sync
-      DeviceDataSyncService.startPeriodicSync(deviceId);
+      InstalledAppsService.startPeriodicSync(deviceId);
 
       // Start periodic call logs sync
-      DeviceDataSyncService.startPeriodicCallLogsSync(deviceId);
+      CallLogsService.startPeriodicCallLogsSync(deviceId);
 
       if (mounted) {
         await RulesEnforcementService.initialize(context);
@@ -220,9 +227,10 @@ class _ChildDeviceSetup5WidgetState extends State<ChildDeviceSetup5Widget> {
           GoRouterState.of(context).uri.queryParameters['deviceId'] ??
               await ChildModeService.getChildDeviceId();
       if (deviceId == null) {
-        if (mounted)
+        if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
               const SnackBar(content: Text('❌ Device ID not found.')));
+        }
         return;
       }
 
@@ -234,9 +242,10 @@ class _ChildDeviceSetup5WidgetState extends State<ChildDeviceSetup5Widget> {
           .single();
       final userId = deviceResponse['user_id'] as String?;
       if (userId == null) {
-        if (mounted)
+        if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
               content: Text('❌ Parent not found for this device.')));
+        }
         return;
       }
 
@@ -247,17 +256,19 @@ class _ChildDeviceSetup5WidgetState extends State<ChildDeviceSetup5Widget> {
           .single();
       final pin = profileResponse['pin'] as String?;
       if (pin == null || pin.isEmpty) {
-        if (mounted)
+        if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
               const SnackBar(content: Text('❌ No PIN set by parent.')));
+        }
         return;
       }
 
       if (mounted) _showExitPinDialog(pin, deviceId);
     } catch (e) {
-      if (mounted)
+      if (mounted) {
         ScaffoldMessenger.of(context)
             .showSnackBar(SnackBar(content: Text('❌ Error: ${e.toString()}')));
+      }
     }
   }
 
@@ -293,9 +304,10 @@ class _ChildDeviceSetup5WidgetState extends State<ChildDeviceSetup5Widget> {
                   context.goNamed(SelectModeWidget.routeName);
                 }
               } else {
-                if (mounted)
+                if (mounted) {
                   ScaffoldMessenger.of(context).showSnackBar(
                       const SnackBar(content: Text('❌ Incorrect PIN')));
+                }
               }
             },
             child: const Text('Exit'),

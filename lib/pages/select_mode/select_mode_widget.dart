@@ -1,6 +1,7 @@
 import '/flutter_flow/flutter_flow_theme.dart';
 import '/flutter_flow/flutter_flow_util.dart';
 import '/index.dart';
+import '/services/self_mode_service.dart';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'select_mode_model.dart';
@@ -561,6 +562,9 @@ class _SelectModeWidgetState extends State<SelectModeWidget> {
                                       hoverColor: Colors.transparent,
                                       highlightColor: Colors.transparent,
                                       onTap: () async {
+                                        // Activate self mode before navigating
+                                        await SelfModeService
+                                            .activateSelfMode();
                                         context.pushNamed(
                                             SelfModeWidget.routeName);
                                       },
