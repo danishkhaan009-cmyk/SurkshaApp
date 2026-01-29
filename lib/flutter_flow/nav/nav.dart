@@ -4,6 +4,8 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
+import '../../services/child_mode_service.dart';
+import '../../services/self_mode_service.dart';
 import '/main.dart';
 import '/flutter_flow/flutter_flow_util.dart';
 
@@ -41,16 +43,31 @@ GoRouter createRouter(AppStateNotifier appStateNotifier) => GoRouter(
       debugLogDiagnostics: true,
       refreshListenable: appStateNotifier,
       navigatorKey: appNavigatorKey,
-      redirect: (context, state) {
+      redirect: (context, state) async {
         final session = Supabase.instance.client.auth.currentSession;
         final loggedIn = session != null;
-        
+
+        final isChildMode = await ChildModeService.isChildModeActive();
+        final isSelfMode = await SelfModeService.isSelfModeActive();
+
         // If logged in and trying to access auth pages (splash, login, signup), redirect home
-        final authPaths = ['/', '/splashScreen', '/loginScreen', '/signupScreen'];
+        final authPaths = [
+          '/',
+          '/splashScreen',
+          '/loginScreen',
+          '/signupScreen'
+        ];
         if (loggedIn && authPaths.contains(state.uri.path)) {
-          return '/parentDashboard';
+          if (isChildMode) {
+            return '/childDeviceSetup5';
+          } else if (isSelfMode) {
+            return '/selfMode';
+          } else {
+            return '/parentDashboard';
+          }
+        } else if (!loggedIn && !authPaths.contains(state.uri.path)) {
+          return '/splashScreen';
         }
-        
         return null;
       },
       routes: [

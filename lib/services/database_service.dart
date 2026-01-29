@@ -175,6 +175,7 @@ class DatabaseService {
   }
 
   // ==================== LOCATIONS ====================
+/*
 
   // Get latest location for a device
   static Future<Map<String, dynamic>?> getLatestLocation(
@@ -219,6 +220,7 @@ class DatabaseService {
       'address': address,
     });
   }
+*/
 
   // ==================== SUBSCRIPTIONS ====================
 

@@ -1,14 +1,14 @@
-import 'package:supabase_flutter/supabase_flutter.dart';
 import '/flutter_flow/flutter_flow_theme.dart';
 import '/flutter_flow/flutter_flow_util.dart';
+import '/flutter_flow/flutter_flow_widgets.dart';
 import '/index.dart';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import '/services/child_mode_service.dart';
-import '/services/permission_service.dart';
 import 'splash_screen_model.dart';
 export 'splash_screen_model.dart';
 
+/// this will be the app splash screen
 class SplashScreenWidget extends StatefulWidget {
   const SplashScreenWidget({super.key});
 
@@ -21,6 +21,7 @@ class SplashScreenWidget extends StatefulWidget {
 
 class _SplashScreenWidgetState extends State<SplashScreenWidget> {
   late SplashScreenModel _model;
+
   final scaffoldKey = GlobalKey<ScaffoldState>();
 
   @override
@@ -28,148 +29,896 @@ class _SplashScreenWidgetState extends State<SplashScreenWidget> {
     super.initState();
     _model = createModel(context, () => SplashScreenModel());
 
-    // Check application state after a short delay for branding
-    WidgetsBinding.instance.addPostFrameCallback((_) => _checkAppState());
+    // Check if child mode is active and navigate accordingly
+    _checkChildModeState();
   }
 
-  Future<void> _checkAppState() async {
-    print('🚀 SplashScreen: Checking app state...');
-    
-    // Give Supabase and local storage a moment to initialize
-    await Future.delayed(const Duration(milliseconds: 1500));
+  Future<void> _checkChildModeState() async {
+    await Future.delayed(
+        const Duration(seconds: 2)); // Wait for splash animation
+    final isChildMode = await ChildModeService.isChildModeActive();
 
-    try {
-      // 1. Check for Child Mode (Highest Priority)
-      final isChildMode = await ChildModeService.isChildModeActive();
-      print('🔍 Is Child Mode Active: $isChildMode');
-      
-      if (isChildMode) {
-        // IMPORTANT: Verify Accessibility Service is enabled if in child mode
-        final isAccessibilityEnabled = await PermissionService.isAccessibilityEnabled();
-        print('🔍 Accessibility Enabled: $isAccessibilityEnabled');
-        
-        if (!isAccessibilityEnabled && mounted) {
-          // Force user to enable accessibility if it's off
-          await _showAccessibilityPrompt();
-        }
+    if (!mounted) return;
 
-        final deviceId = await ChildModeService.getChildDeviceId();
-        print('📱 Child Device ID: $deviceId');
-        
-        if (deviceId != null && mounted) {
-          // If in child mode, go to the permission/monitoring screen
-          context.goNamed(
-            ChildDeviceSetup5Widget.routeName,
-            queryParameters: {
-              'deviceId': deviceId,
-              'isReentry': 'true',
-            },
-          );
-          return;
-        }
-      }
-
-      // 2. Auth Session Check for Parents
-      final session = Supabase.instance.client.auth.currentSession;
-      if (session != null) {
-        print('🏠 SplashScreen: Parent session found. Navigating to Dashboard...');
-        if (mounted) context.goNamed(ParentDashboardWidget.routeName);
-        return;
-      }
-
-      // 3. Normal Flow: Go to Login
-      print('🔐 SplashScreen: No session. Navigating to Login_Screen...');
-      if (mounted) context.goNamed(LoginScreenWidget.routeName);
-      
-    } catch (e) {
-      print('❌ SplashScreen Error: $e');
-      if (mounted) {
-        context.goNamed(LoginScreenWidget.routeName);
+    if (isChildMode) {
+      // Get stored device ID and navigate to Setup5
+      final deviceId = await ChildModeService.getChildDeviceId();
+      if (deviceId != null) {
+        // Navigate to Setup5 screen directly
+        context.goNamed(
+          ChildDeviceSetup5Widget.routeName,
+          queryParameters: {
+            'deviceId': deviceId,
+            'isReentry': 'true',
+          },
+        );
       }
     }
-  }
-
-  Future<void> _showAccessibilityPrompt() async {
-    await showDialog(
-      context: context,
-      barrierDismissible: false,
-      builder: (context) => AlertDialog(
-        title: const Text('Action Required'),
-        content: const Text(
-          'To keep app locking active, SurakshaApp needs its Accessibility Service enabled.\n\nPlease enable it in the next screen.',
-        ),
-        actions: [
-          ElevatedButton(
-            onPressed: () async {
-              Navigator.pop(context);
-              await PermissionService.requestAccessibilityPermission();
-            },
-            style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF00B242)),
-            child: const Text('Open Settings'),
-          ),
-        ],
-      ),
-    );
   }
 
   @override
   void dispose() {
     _model.dispose();
+
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      key: scaffoldKey,
-      backgroundColor: const Color(0xFF00B242),
-      body: Container(
-        width: double.infinity,
-        height: double.infinity,
-        decoration: const BoxDecoration(
-          color: Color(0xFF00B242),
-        ),
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Container(
-              width: 100.0,
-              height: 100.0,
-              decoration: BoxDecoration(
-                color: Colors.white,
-                borderRadius: BorderRadius.circular(20.0),
-                boxShadow: const [
-                  BoxShadow(
-                    color: Colors.black12,
-                    blurRadius: 10,
-                    offset: Offset(0, 5),
-                  )
-                ],
+    return GestureDetector(
+      onTap: () {
+        FocusScope.of(context).unfocus();
+        FocusManager.instance.primaryFocus?.unfocus();
+      },
+      child: Scaffold(
+        key: scaffoldKey,
+        backgroundColor: FlutterFlowTheme.of(context).primaryBackground,
+        body: SafeArea(
+          top: true,
+          child: Column(
+            mainAxisSize: MainAxisSize.max,
+            children: [
+              Expanded(
+                child: Container(
+                  width: MediaQuery.sizeOf(context).width * 1.0,
+                  height: MediaQuery.sizeOf(context).height * 1.0,
+                  decoration: const BoxDecoration(
+                    color: Colors.green,
+                  ),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.max,
+                    children: [
+                      Align(
+                        alignment: const AlignmentDirectional(0.0, 0.0),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.max,
+                          children: [
+                            Opacity(
+                              opacity: 0.0,
+                              child: Text(
+                                'H',
+                                style: FlutterFlowTheme.of(context)
+                                    .bodyMedium
+                                    .override(
+                                  font: GoogleFonts.inter(
+                                    fontWeight: FlutterFlowTheme.of(context)
+                                        .bodyMedium
+                                        .fontWeight,
+                                    fontStyle: FlutterFlowTheme.of(context)
+                                        .bodyMedium
+                                        .fontStyle,
+                                  ),
+                                  letterSpacing: 0.0,
+                                  fontWeight: FlutterFlowTheme.of(context)
+                                      .bodyMedium
+                                      .fontWeight,
+                                  fontStyle: FlutterFlowTheme.of(context)
+                                      .bodyMedium
+                                      .fontStyle,
+                                ),
+                              ),
+                            ),
+                          ]
+                              .divide(const SizedBox(width: 0.0))
+                              .addToStart(const SizedBox(width: 28.0))
+                              .addToEnd(const SizedBox(width: 28.0)),
+                        ),
+                      ),
+                      Align(
+                        alignment: const AlignmentDirectional(0.0, 0.0),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.max,
+                          children: [
+                            Opacity(
+                              opacity: 0.0,
+                              child: Text(
+                                'H',
+                                style: FlutterFlowTheme.of(context)
+                                    .bodyMedium
+                                    .override(
+                                  font: GoogleFonts.inter(
+                                    fontWeight: FlutterFlowTheme.of(context)
+                                        .bodyMedium
+                                        .fontWeight,
+                                    fontStyle: FlutterFlowTheme.of(context)
+                                        .bodyMedium
+                                        .fontStyle,
+                                  ),
+                                  letterSpacing: 0.0,
+                                  fontWeight: FlutterFlowTheme.of(context)
+                                      .bodyMedium
+                                      .fontWeight,
+                                  fontStyle: FlutterFlowTheme.of(context)
+                                      .bodyMedium
+                                      .fontStyle,
+                                ),
+                              ),
+                            ),
+                          ]
+                              .divide(const SizedBox(width: 0.0))
+                              .addToStart(const SizedBox(width: 28.0))
+                              .addToEnd(const SizedBox(width: 28.0)),
+                        ),
+                      ),
+                      Align(
+                        alignment: const AlignmentDirectional(0.0, 0.0),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.max,
+                          children: [
+                            Opacity(
+                              opacity: 0.0,
+                              child: Text(
+                                'H',
+                                style: FlutterFlowTheme.of(context)
+                                    .bodyMedium
+                                    .override(
+                                  font: GoogleFonts.inter(
+                                    fontWeight: FlutterFlowTheme.of(context)
+                                        .bodyMedium
+                                        .fontWeight,
+                                    fontStyle: FlutterFlowTheme.of(context)
+                                        .bodyMedium
+                                        .fontStyle,
+                                  ),
+                                  letterSpacing: 0.0,
+                                  fontWeight: FlutterFlowTheme.of(context)
+                                      .bodyMedium
+                                      .fontWeight,
+                                  fontStyle: FlutterFlowTheme.of(context)
+                                      .bodyMedium
+                                      .fontStyle,
+                                ),
+                              ),
+                            ),
+                          ]
+                              .divide(const SizedBox(width: 0.0))
+                              .addToStart(const SizedBox(width: 28.0))
+                              .addToEnd(const SizedBox(width: 28.0)),
+                        ),
+                      ),
+                      Container(
+                        width: 100.0,
+                        height: 100.0,
+                        decoration: BoxDecoration(
+                          color:
+                          FlutterFlowTheme.of(context).secondaryBackground,
+                          boxShadow: const [
+                            BoxShadow(
+                              blurRadius: 7.0,
+                              color: Color(0x33000000),
+                              offset: Offset(
+                                0.0,
+                                2.0,
+                              ),
+                            )
+                          ],
+                          borderRadius: BorderRadius.circular(15.0),
+                        ),
+                        child: const Icon(
+                          Icons.shield_outlined,
+                          color: Color(0xFF00B242),
+                          size: 80.0,
+                        ),
+                      ),
+                      Align(
+                        alignment: const AlignmentDirectional(0.0, 0.0),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.max,
+                          children: [
+                            Opacity(
+                              opacity: 0.0,
+                              child: Text(
+                                'H',
+                                style: FlutterFlowTheme.of(context)
+                                    .bodyMedium
+                                    .override(
+                                  font: GoogleFonts.inter(
+                                    fontWeight: FlutterFlowTheme.of(context)
+                                        .bodyMedium
+                                        .fontWeight,
+                                    fontStyle: FlutterFlowTheme.of(context)
+                                        .bodyMedium
+                                        .fontStyle,
+                                  ),
+                                  letterSpacing: 0.0,
+                                  fontWeight: FlutterFlowTheme.of(context)
+                                      .bodyMedium
+                                      .fontWeight,
+                                  fontStyle: FlutterFlowTheme.of(context)
+                                      .bodyMedium
+                                      .fontStyle,
+                                ),
+                              ),
+                            ),
+                          ]
+                              .divide(const SizedBox(width: 0.0))
+                              .addToStart(const SizedBox(width: 28.0))
+                              .addToEnd(const SizedBox(width: 28.0)),
+                        ),
+                      ),
+                      Align(
+                        alignment: const AlignmentDirectional(0.0, 0.0),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.max,
+                          children: [
+                            Opacity(
+                              opacity: 0.0,
+                              child: Text(
+                                'H',
+                                style: FlutterFlowTheme.of(context)
+                                    .bodyMedium
+                                    .override(
+                                  font: GoogleFonts.inter(
+                                    fontWeight: FlutterFlowTheme.of(context)
+                                        .bodyMedium
+                                        .fontWeight,
+                                    fontStyle: FlutterFlowTheme.of(context)
+                                        .bodyMedium
+                                        .fontStyle,
+                                  ),
+                                  letterSpacing: 0.0,
+                                  fontWeight: FlutterFlowTheme.of(context)
+                                      .bodyMedium
+                                      .fontWeight,
+                                  fontStyle: FlutterFlowTheme.of(context)
+                                      .bodyMedium
+                                      .fontStyle,
+                                ),
+                              ),
+                            ),
+                          ]
+                              .divide(const SizedBox(width: 0.0))
+                              .addToStart(const SizedBox(width: 28.0))
+                              .addToEnd(const SizedBox(width: 28.0)),
+                        ),
+                      ),
+                      Align(
+                        alignment: const AlignmentDirectional(0.0, 0.0),
+                        child: Text(
+                          'SurakshaApp',
+                          textAlign: TextAlign.center,
+                          style: FlutterFlowTheme.of(context)
+                              .headlineLarge
+                              .override(
+                            font: GoogleFonts.poppins(
+                              fontWeight: FontWeight.w600,
+                              fontStyle: FlutterFlowTheme.of(context)
+                                  .headlineLarge
+                                  .fontStyle,
+                            ),
+                            color: Colors.white,
+                            fontSize: 26.0,
+                            letterSpacing: 0.0,
+                            fontWeight: FontWeight.w600,
+                            fontStyle: FlutterFlowTheme.of(context)
+                                .headlineLarge
+                                .fontStyle,
+                          ),
+                        ),
+                      ),
+                      Text(
+                        'Your Child\'s Digital Safety Partner\n',
+                        style: FlutterFlowTheme.of(context).labelLarge.override(
+                          font: GoogleFonts.inter(
+                            fontWeight: FlutterFlowTheme.of(context)
+                                .labelLarge
+                                .fontWeight,
+                            fontStyle: FlutterFlowTheme.of(context)
+                                .labelLarge
+                                .fontStyle,
+                          ),
+                          color: Colors.white,
+                          fontSize: 16.0,
+                          letterSpacing: 0.0,
+                          fontWeight: FlutterFlowTheme.of(context)
+                              .labelLarge
+                              .fontWeight,
+                          fontStyle: FlutterFlowTheme.of(context)
+                              .labelLarge
+                              .fontStyle,
+                          lineHeight: 1.3,
+                        ),
+                      ),
+                      Align(
+                        alignment: const AlignmentDirectional(0.0, 0.0),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.max,
+                          children: [
+                            Opacity(
+                              opacity: 0.0,
+                              child: Text(
+                                'H',
+                                style: FlutterFlowTheme.of(context)
+                                    .bodyMedium
+                                    .override(
+                                  font: GoogleFonts.inter(
+                                    fontWeight: FlutterFlowTheme.of(context)
+                                        .bodyMedium
+                                        .fontWeight,
+                                    fontStyle: FlutterFlowTheme.of(context)
+                                        .bodyMedium
+                                        .fontStyle,
+                                  ),
+                                  letterSpacing: 0.0,
+                                  fontWeight: FlutterFlowTheme.of(context)
+                                      .bodyMedium
+                                      .fontWeight,
+                                  fontStyle: FlutterFlowTheme.of(context)
+                                      .bodyMedium
+                                      .fontStyle,
+                                ),
+                              ),
+                            ),
+                          ]
+                              .divide(const SizedBox(width: 0.0))
+                              .addToStart(const SizedBox(width: 28.0))
+                              .addToEnd(const SizedBox(width: 28.0)),
+                        ),
+                      ),
+                      Align(
+                        alignment: const AlignmentDirectional(0.0, 0.0),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.max,
+                          children: [
+                            Container(
+                              width: 40.0,
+                              height: 40.0,
+                              decoration: BoxDecoration(
+                                color: const Color(0xFF58C16D),
+                                borderRadius: BorderRadius.circular(10.0),
+                              ),
+                              child: const Icon(
+                                Icons.check_circle_outlined,
+                                color: Colors.white,
+                                size: 24.0,
+                              ),
+                            ),
+                            Text(
+                              'Keep your children safe online',
+                              style: FlutterFlowTheme.of(context)
+                                  .bodyMedium
+                                  .override(
+                                font: GoogleFonts.inter(
+                                  fontWeight: FlutterFlowTheme.of(context)
+                                      .bodyMedium
+                                      .fontWeight,
+                                  fontStyle: FlutterFlowTheme.of(context)
+                                      .bodyMedium
+                                      .fontStyle,
+                                ),
+                                color: Colors.white,
+                                fontSize: 16.0,
+                                letterSpacing: 0.0,
+                                fontWeight: FlutterFlowTheme.of(context)
+                                    .bodyMedium
+                                    .fontWeight,
+                                fontStyle: FlutterFlowTheme.of(context)
+                                    .bodyMedium
+                                    .fontStyle,
+                              ),
+                            ),
+                          ]
+                              .divide(const SizedBox(width: 10.0))
+                              .addToStart(const SizedBox(width: 44.0))
+                              .addToEnd(const SizedBox(width: 28.0)),
+                        ),
+                      ),
+                      Align(
+                        alignment: const AlignmentDirectional(0.0, 0.0),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.max,
+                          children: [
+                            Opacity(
+                              opacity: 0.0,
+                              child: Text(
+                                'H',
+                                style: FlutterFlowTheme.of(context)
+                                    .bodyMedium
+                                    .override(
+                                  font: GoogleFonts.inter(
+                                    fontWeight: FlutterFlowTheme.of(context)
+                                        .bodyMedium
+                                        .fontWeight,
+                                    fontStyle: FlutterFlowTheme.of(context)
+                                        .bodyMedium
+                                        .fontStyle,
+                                  ),
+                                  letterSpacing: 0.0,
+                                  fontWeight: FlutterFlowTheme.of(context)
+                                      .bodyMedium
+                                      .fontWeight,
+                                  fontStyle: FlutterFlowTheme.of(context)
+                                      .bodyMedium
+                                      .fontStyle,
+                                ),
+                              ),
+                            ),
+                          ]
+                              .divide(const SizedBox(width: 0.0))
+                              .addToStart(const SizedBox(width: 28.0))
+                              .addToEnd(const SizedBox(width: 28.0)),
+                        ),
+                      ),
+                      Align(
+                        alignment: const AlignmentDirectional(0.0, 0.0),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.max,
+                          mainAxisAlignment: MainAxisAlignment.start,
+                          crossAxisAlignment: CrossAxisAlignment.center,
+                          children: [
+                            Container(
+                              width: 40.0,
+                              height: 40.0,
+                              decoration: BoxDecoration(
+                                color: const Color(0xFF58C16D),
+                                borderRadius: BorderRadius.circular(10.0),
+                              ),
+                              child: const Align(
+                                alignment: AlignmentDirectional(0.1, 0.0),
+                                child: Icon(
+                                  Icons.favorite_border,
+                                  color: Colors.white,
+                                  size: 24.0,
+                                ),
+                              ),
+                            ),
+                            Text(
+                              'Monitor and protect with care',
+                              style: FlutterFlowTheme.of(context)
+                                  .bodyMedium
+                                  .override(
+                                font: GoogleFonts.inter(
+                                  fontWeight: FlutterFlowTheme.of(context)
+                                      .bodyMedium
+                                      .fontWeight,
+                                  fontStyle: FlutterFlowTheme.of(context)
+                                      .bodyMedium
+                                      .fontStyle,
+                                ),
+                                color: Colors.white,
+                                fontSize: 16.0,
+                                letterSpacing: 0.0,
+                                fontWeight: FlutterFlowTheme.of(context)
+                                    .bodyMedium
+                                    .fontWeight,
+                                fontStyle: FlutterFlowTheme.of(context)
+                                    .bodyMedium
+                                    .fontStyle,
+                              ),
+                            ),
+                          ]
+                              .divide(const SizedBox(width: 10.0))
+                              .addToStart(const SizedBox(width: 44.0))
+                              .addToEnd(const SizedBox(width: 28.0)),
+                        ),
+                      ),
+                      Align(
+                        alignment: const AlignmentDirectional(0.0, 0.0),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.max,
+                          children: [
+                            Opacity(
+                              opacity: 0.0,
+                              child: Text(
+                                'H',
+                                style: FlutterFlowTheme.of(context)
+                                    .bodyMedium
+                                    .override(
+                                  font: GoogleFonts.inter(
+                                    fontWeight: FlutterFlowTheme.of(context)
+                                        .bodyMedium
+                                        .fontWeight,
+                                    fontStyle: FlutterFlowTheme.of(context)
+                                        .bodyMedium
+                                        .fontStyle,
+                                  ),
+                                  letterSpacing: 0.0,
+                                  fontWeight: FlutterFlowTheme.of(context)
+                                      .bodyMedium
+                                      .fontWeight,
+                                  fontStyle: FlutterFlowTheme.of(context)
+                                      .bodyMedium
+                                      .fontStyle,
+                                ),
+                              ),
+                            ),
+                          ]
+                              .divide(const SizedBox(width: 0.0))
+                              .addToStart(const SizedBox(width: 28.0))
+                              .addToEnd(const SizedBox(width: 28.0)),
+                        ),
+                      ),
+                      Align(
+                        alignment: const AlignmentDirectional(0.0, 0.0),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.max,
+                          mainAxisAlignment: MainAxisAlignment.start,
+                          crossAxisAlignment: CrossAxisAlignment.center,
+                          children: [
+                            Container(
+                              width: 40.0,
+                              height: 40.0,
+                              decoration: BoxDecoration(
+                                color: const Color(0xFF58C16D),
+                                borderRadius: BorderRadius.circular(10.0),
+                              ),
+                              child: const Align(
+                                alignment: AlignmentDirectional(0.1, 0.0),
+                                child: Icon(
+                                  Icons.lock_outline,
+                                  color: Colors.white,
+                                  size: 24.0,
+                                ),
+                              ),
+                            ),
+                            Text(
+                              'Complete digital wellness control',
+                              style: FlutterFlowTheme.of(context)
+                                  .bodyMedium
+                                  .override(
+                                font: GoogleFonts.inter(
+                                  fontWeight: FlutterFlowTheme.of(context)
+                                      .bodyMedium
+                                      .fontWeight,
+                                  fontStyle: FlutterFlowTheme.of(context)
+                                      .bodyMedium
+                                      .fontStyle,
+                                ),
+                                color: Colors.white,
+                                fontSize: 16.0,
+                                letterSpacing: 0.0,
+                                fontWeight: FlutterFlowTheme.of(context)
+                                    .bodyMedium
+                                    .fontWeight,
+                                fontStyle: FlutterFlowTheme.of(context)
+                                    .bodyMedium
+                                    .fontStyle,
+                              ),
+                            ),
+                          ]
+                              .divide(const SizedBox(width: 10.0))
+                              .addToStart(const SizedBox(width: 44.0))
+                              .addToEnd(const SizedBox(width: 28.0)),
+                        ),
+                      ),
+                      Align(
+                        alignment: const AlignmentDirectional(0.0, 0.0),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.max,
+                          children: [
+                            Opacity(
+                              opacity: 0.0,
+                              child: Text(
+                                'H',
+                                style: FlutterFlowTheme.of(context)
+                                    .bodyMedium
+                                    .override(
+                                  font: GoogleFonts.inter(
+                                    fontWeight: FlutterFlowTheme.of(context)
+                                        .bodyMedium
+                                        .fontWeight,
+                                    fontStyle: FlutterFlowTheme.of(context)
+                                        .bodyMedium
+                                        .fontStyle,
+                                  ),
+                                  letterSpacing: 0.0,
+                                  fontWeight: FlutterFlowTheme.of(context)
+                                      .bodyMedium
+                                      .fontWeight,
+                                  fontStyle: FlutterFlowTheme.of(context)
+                                      .bodyMedium
+                                      .fontStyle,
+                                ),
+                              ),
+                            ),
+                          ]
+                              .divide(const SizedBox(width: 0.0))
+                              .addToStart(const SizedBox(width: 28.0))
+                              .addToEnd(const SizedBox(width: 28.0)),
+                        ),
+                      ),
+                      Align(
+                        alignment: const AlignmentDirectional(0.0, 0.0),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.max,
+                          children: [
+                            Opacity(
+                              opacity: 0.0,
+                              child: Text(
+                                'H',
+                                style: FlutterFlowTheme.of(context)
+                                    .bodyMedium
+                                    .override(
+                                  font: GoogleFonts.inter(
+                                    fontWeight: FlutterFlowTheme.of(context)
+                                        .bodyMedium
+                                        .fontWeight,
+                                    fontStyle: FlutterFlowTheme.of(context)
+                                        .bodyMedium
+                                        .fontStyle,
+                                  ),
+                                  letterSpacing: 0.0,
+                                  fontWeight: FlutterFlowTheme.of(context)
+                                      .bodyMedium
+                                      .fontWeight,
+                                  fontStyle: FlutterFlowTheme.of(context)
+                                      .bodyMedium
+                                      .fontStyle,
+                                ),
+                              ),
+                            ),
+                          ]
+                              .divide(const SizedBox(width: 0.0))
+                              .addToStart(const SizedBox(width: 28.0))
+                              .addToEnd(const SizedBox(width: 28.0)),
+                        ),
+                      ),
+                      Align(
+                        alignment: const AlignmentDirectional(0.0, 0.0),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.max,
+                          children: [
+                            Opacity(
+                              opacity: 0.0,
+                              child: Text(
+                                'H',
+                                style: FlutterFlowTheme.of(context)
+                                    .bodyMedium
+                                    .override(
+                                  font: GoogleFonts.inter(
+                                    fontWeight: FlutterFlowTheme.of(context)
+                                        .bodyMedium
+                                        .fontWeight,
+                                    fontStyle: FlutterFlowTheme.of(context)
+                                        .bodyMedium
+                                        .fontStyle,
+                                  ),
+                                  letterSpacing: 0.0,
+                                  fontWeight: FlutterFlowTheme.of(context)
+                                      .bodyMedium
+                                      .fontWeight,
+                                  fontStyle: FlutterFlowTheme.of(context)
+                                      .bodyMedium
+                                      .fontStyle,
+                                ),
+                              ),
+                            ),
+                          ]
+                              .divide(const SizedBox(width: 0.0))
+                              .addToStart(const SizedBox(width: 28.0))
+                              .addToEnd(const SizedBox(width: 28.0)),
+                        ),
+                      ),
+                      Align(
+                        alignment: const AlignmentDirectional(0.0, 0.0),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.max,
+                          children: [
+                            Opacity(
+                              opacity: 0.0,
+                              child: Text(
+                                'H',
+                                style: FlutterFlowTheme.of(context)
+                                    .bodyMedium
+                                    .override(
+                                  font: GoogleFonts.inter(
+                                    fontWeight: FlutterFlowTheme.of(context)
+                                        .bodyMedium
+                                        .fontWeight,
+                                    fontStyle: FlutterFlowTheme.of(context)
+                                        .bodyMedium
+                                        .fontStyle,
+                                  ),
+                                  letterSpacing: 0.0,
+                                  fontWeight: FlutterFlowTheme.of(context)
+                                      .bodyMedium
+                                      .fontWeight,
+                                  fontStyle: FlutterFlowTheme.of(context)
+                                      .bodyMedium
+                                      .fontStyle,
+                                ),
+                              ),
+                            ),
+                          ]
+                              .divide(const SizedBox(width: 0.0))
+                              .addToStart(const SizedBox(width: 28.0))
+                              .addToEnd(const SizedBox(width: 28.0)),
+                        ),
+                      ),
+                      Align(
+                        alignment: const AlignmentDirectional(0.0, 0.0),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.max,
+                          children: [
+                            Opacity(
+                              opacity: 0.0,
+                              child: Text(
+                                'H',
+                                style: FlutterFlowTheme.of(context)
+                                    .bodyMedium
+                                    .override(
+                                  font: GoogleFonts.inter(
+                                    fontWeight: FlutterFlowTheme.of(context)
+                                        .bodyMedium
+                                        .fontWeight,
+                                    fontStyle: FlutterFlowTheme.of(context)
+                                        .bodyMedium
+                                        .fontStyle,
+                                  ),
+                                  letterSpacing: 0.0,
+                                  fontWeight: FlutterFlowTheme.of(context)
+                                      .bodyMedium
+                                      .fontWeight,
+                                  fontStyle: FlutterFlowTheme.of(context)
+                                      .bodyMedium
+                                      .fontStyle,
+                                ),
+                              ),
+                            ),
+                          ]
+                              .divide(const SizedBox(width: 0.0))
+                              .addToStart(const SizedBox(width: 28.0))
+                              .addToEnd(const SizedBox(width: 28.0)),
+                        ),
+                      ),
+                      FFButtonWidget(
+                        onPressed: () async {
+                          context.pushNamed(LoginScreenWidget.routeName);
+                        },
+                        text: 'Get Started',
+                        options: FFButtonOptions(
+                          width: 300.0,
+                          height: 55.0,
+                          padding: const EdgeInsetsDirectional.fromSTEB(
+                              16.0, 0.0, 16.0, 0.0),
+                          iconPadding: const EdgeInsetsDirectional.fromSTEB(
+                              0.0, 0.0, 0.0, 0.0),
+                          color: const Color(0xFF1A1A1A),
+                          textStyle:
+                          FlutterFlowTheme.of(context).labelMedium.override(
+                            font: GoogleFonts.inter(
+                              fontWeight: FlutterFlowTheme.of(context)
+                                  .labelMedium
+                                  .fontWeight,
+                              fontStyle: FlutterFlowTheme.of(context)
+                                  .labelMedium
+                                  .fontStyle,
+                            ),
+                            color: Colors.white,
+                            fontSize: 16.0,
+                            letterSpacing: 0.0,
+                            fontWeight: FlutterFlowTheme.of(context)
+                                .labelMedium
+                                .fontWeight,
+                            fontStyle: FlutterFlowTheme.of(context)
+                                .labelMedium
+                                .fontStyle,
+                          ),
+                          elevation: 0.0,
+                          borderRadius: BorderRadius.circular(10.0),
+                        ),
+                      ),
+                      Align(
+                        alignment: const AlignmentDirectional(0.0, 0.0),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.max,
+                          children: [
+                            Opacity(
+                              opacity: 0.0,
+                              child: Text(
+                                'H',
+                                style: FlutterFlowTheme.of(context)
+                                    .bodyMedium
+                                    .override(
+                                  font: GoogleFonts.inter(
+                                    fontWeight: FlutterFlowTheme.of(context)
+                                        .bodyMedium
+                                        .fontWeight,
+                                    fontStyle: FlutterFlowTheme.of(context)
+                                        .bodyMedium
+                                        .fontStyle,
+                                  ),
+                                  letterSpacing: 0.0,
+                                  fontWeight: FlutterFlowTheme.of(context)
+                                      .bodyMedium
+                                      .fontWeight,
+                                  fontStyle: FlutterFlowTheme.of(context)
+                                      .bodyMedium
+                                      .fontStyle,
+                                ),
+                              ),
+                            ),
+                          ]
+                              .divide(const SizedBox(width: 0.0))
+                              .addToStart(const SizedBox(width: 28.0))
+                              .addToEnd(const SizedBox(width: 28.0)),
+                        ),
+                      ),
+                      Align(
+                        alignment: const AlignmentDirectional(0.0, 0.0),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.max,
+                          children: [
+                            Opacity(
+                              opacity: 0.0,
+                              child: Text(
+                                'H',
+                                style: FlutterFlowTheme.of(context)
+                                    .bodyMedium
+                                    .override(
+                                  font: GoogleFonts.inter(
+                                    fontWeight: FlutterFlowTheme.of(context)
+                                        .bodyMedium
+                                        .fontWeight,
+                                    fontStyle: FlutterFlowTheme.of(context)
+                                        .bodyMedium
+                                        .fontStyle,
+                                  ),
+                                  letterSpacing: 0.0,
+                                  fontWeight: FlutterFlowTheme.of(context)
+                                      .bodyMedium
+                                      .fontWeight,
+                                  fontStyle: FlutterFlowTheme.of(context)
+                                      .bodyMedium
+                                      .fontStyle,
+                                ),
+                              ),
+                            ),
+                          ]
+                              .divide(const SizedBox(width: 0.0))
+                              .addToStart(const SizedBox(width: 28.0))
+                              .addToEnd(const SizedBox(width: 28.0)),
+                        ),
+                      ),
+                      Text(
+                        'Trusted by thousands of families across India',
+                        style: FlutterFlowTheme.of(context).labelLarge.override(
+                          font: GoogleFonts.inter(
+                            fontWeight: FlutterFlowTheme.of(context)
+                                .labelLarge
+                                .fontWeight,
+                            fontStyle: FlutterFlowTheme.of(context)
+                                .labelLarge
+                                .fontStyle,
+                          ),
+                          color: Colors.white,
+                          fontSize: 12.0,
+                          letterSpacing: 0.0,
+                          fontWeight: FlutterFlowTheme.of(context)
+                              .labelLarge
+                              .fontWeight,
+                          fontStyle: FlutterFlowTheme.of(context)
+                              .labelLarge
+                              .fontStyle,
+                          lineHeight: 1.3,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
               ),
-              child: const Icon(
-                Icons.shield_outlined,
-                color: Color(0xFF00B242),
-                size: 70.0,
-              ),
-            ),
-            const SizedBox(height: 30),
-            Text(
-              'SurakshaApp',
-              style: GoogleFonts.poppins(
-                fontSize: 32,
-                fontWeight: FontWeight.bold,
-                color: Colors.white,
-              ),
-            ),
-            const SizedBox(height: 10),
-            Text(
-              'Your Digital Safety Partner',
-              style: GoogleFonts.inter(
-                fontSize: 16,
-                color: Colors.white.withOpacity(0.9),
-              ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );

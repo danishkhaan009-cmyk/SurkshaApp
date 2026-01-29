@@ -14,8 +14,10 @@ class AppLockScreenWidget extends StatefulWidget {
 
   const AppLockScreenWidget({super.key});
 
-  static String routeName = 'App_Lock_Screen';
-  static String routePath = '/appLockScreen';
+
+  static const routePath = '/appLockScreen';
+  static const routeName = 'App_Lock_Screen';
+
 
   @override
   State<AppLockScreenWidget> createState() => _AppLockScreenWidgetState();

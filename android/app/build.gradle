@@ -30,8 +30,8 @@ if (keystorePropertiesFile.exists()) {
 
 android {
     namespace "com.mycompany.SurakshaApp"
-    compileSdkVersion 35
-    
+    compileSdkVersion 36
+
 
     compileOptions {
         coreLibraryDesugaringEnabled true
@@ -55,7 +55,7 @@ android {
     defaultConfig {
         applicationId "com.mycompany.SurakshaApp"
         minSdkVersion flutter.minSdkVersion
-        targetSdkVersion 35
+        targetSdkVersion 36
         versionCode flutterVersionCode.toInteger()
         versionName flutterVersionName
     }
@@ -88,4 +88,16 @@ dependencies {
     implementation "org.jetbrains.kotlin:kotlin-stdlib-jdk7:2.1.0"
     implementation 'androidx.appcompat:appcompat:1.6.1'
     implementation 'androidx.constraintlayout:constraintlayout:2.1.4'
+    
+    // Google Play Services Location for background location tracking
+    implementation 'com.google.android.gms:play-services-location:21.1.0'
+    
+    // WorkManager for periodic background location updates
+    implementation 'androidx.work:work-runtime-ktx:2.9.0'
+    
+    // Coroutines support for Play Services Tasks
+    implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-play-services:1.7.3'
+    
+    // Coroutines support for Guava ListenableFuture (used by WorkManager)
+    implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-guava:1.7.3'
 }

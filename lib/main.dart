@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:google_fonts/google_fonts.dart';
 
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:flutter_web_plugins/url_strategy.dart';
@@ -9,26 +10,39 @@ import 'package:floating_bottom_navigation_bar/floating_bottom_navigation_bar.da
 import 'index.dart';
 import '/services/location_tracking_service.dart';
 import '/services/child_mode_service.dart';
-import '/services/rules_enforcement_service.dart';
+import 'package:flutter/services.dart' show rootBundle;
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   GoRouter.optionURLReflectsImperativeAPIs = true;
   usePathUrlStrategy();
 
-  // Run FlutterFlow theme initialization and Supabase in parallel for faster startup
-  await Future.wait([
-    FlutterFlowTheme.initialize(),
-    Supabase.initialize(
+  // Configure Google Fonts - wrap in try-catch to handle AssetManifest errors
+  try {
+    GoogleFonts.config.allowRuntimeFetching = true;
+  } catch (e) {
+    print('⚠️ Google Fonts config failed: $e');
+  }
+
+  // Run FlutterFlow theme initialization first so the app can start even if Supabase fails.
+  await FlutterFlowTheme.initialize();
+
+  // Initialize Supabase but don't let an init failure abort app startup.
+  try {
+    await Supabase.initialize(
       url: 'https://myxdypywnifdsaorlhsy.supabase.co',
       anonKey:
           'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im15eGR5cHl3bmlmZHNhb3JsaHN5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjUxMjQ1MDUsImV4cCI6MjA4MDcwMDUwNX0.biZRTsavn04B3NIfNPPlIwDuabArdR-CFdohYEWSdz8',
       authOptions: const FlutterAuthClientOptions(
-        authFlowType: AuthFlowType.pkce, // Modern standard for better persistence
-        autoRefreshToken: true,        // Automatically keeps the session alive
+        authFlowType: AuthFlowType.pkce,
+        autoRefreshToken: true,
       ),
-    ),
-  ]);
+    );
+    print('✅ Supabase initialized');
+  } catch (e, st) {
+    // Log init failure but continue startup; app can still run with degraded functionality.
+    print('⚠️ Supabase initialization failed: $e\n$st');
+  }
 
   // Initialize location tracking service (will restore if it was active before)
   try {
@@ -48,8 +62,7 @@ class MyApp extends StatefulWidget {
   @override
   State<MyApp> createState() => _MyAppState();
 
-  static _MyAppState of(BuildContext context) =>
-      context.findAncestorStateOfType<_MyAppState>()!;
+  static _MyAppState of(BuildContext context) => context.findAncestorStateOfType<_MyAppState>()!;
 }
 
 class _MyAppState extends State<MyApp> {
@@ -58,19 +71,16 @@ class _MyAppState extends State<MyApp> {
   late AppStateNotifier _appStateNotifier;
   late GoRouter _router;
 
+  // New: whether AssetManifest.json is available (controls GoogleFonts usage)
+  bool _assetManifestExists = true;
+
   String getRoute([RouteMatch? routeMatch]) {
-    final RouteMatch lastMatch =
-        routeMatch ?? _router.routerDelegate.currentConfiguration.last;
-    final RouteMatchList matchList = lastMatch is ImperativeRouteMatch
-        ? lastMatch.matches
-        : _router.routerDelegate.currentConfiguration;
+    final RouteMatch lastMatch = routeMatch ?? _router.routerDelegate.currentConfiguration.last;
+    final RouteMatchList matchList = lastMatch is ImperativeRouteMatch ? lastMatch.matches : _router.routerDelegate.currentConfiguration;
     return matchList.uri.toString();
   }
 
-  List<String> getRouteStack() =>
-      _router.routerDelegate.currentConfiguration.matches
-          .map((e) => getRoute(e))
-          .toList();
+  List<String> getRouteStack() => _router.routerDelegate.currentConfiguration.matches.map((e) => getRoute(e)).toList();
 
   @override
   void initState() {
@@ -81,13 +91,16 @@ class _MyAppState extends State<MyApp> {
 
     // Initialize background monitoring if in child mode
     _initializeBackgroundServices();
+
+    // Check for AssetManifest.json so GoogleFonts doesn't crash when it's missing
+    _checkAssetManifest();
   }
 
   Future<void> _initializeBackgroundServices() async {
     try {
       final isChildMode = await ChildModeService.isChildModeActive();
       final deviceId = await ChildModeService.getChildDeviceId();
-
+      print("isChildMode Active:  $isChildMode");
       if (isChildMode && deviceId != null && deviceId.isNotEmpty) {
         print('✅ Child device detected: $deviceId - Resuming background monitoring');
         WidgetsBinding.instance.addPostFrameCallback((_) async {
@@ -104,16 +117,41 @@ class _MyAppState extends State<MyApp> {
     }
   }
 
+  Future<void> _checkAssetManifest() async {
+    try {
+      await rootBundle.loadString('AssetManifest.json');
+      // If load succeeds we keep using GoogleFonts
+      safeSetState(() => _assetManifestExists = true);
+    } catch (e) {
+      // AssetManifest.json missing — disable GoogleFonts usage (fallback to default)
+      print('⚠️ AssetManifest.json not found — disabling GoogleFonts: $e');
+      safeSetState(() => _assetManifestExists = false);
+    }
+  }
+
   void setThemeMode(ThemeMode mode) => safeSetState(() {
         _themeMode = mode;
         FlutterFlowTheme.saveThemeMode(mode);
       });
 
+  TextTheme _safeTextTheme(BuildContext context) {
+    if (!_assetManifestExists) {
+      // If manifest missing, avoid GoogleFonts which can throw when AssetManifest.json is absent.
+      return Theme.of(context).textTheme;
+    }
+    try {
+      return GoogleFonts.interTextTheme(Theme.of(context).textTheme);
+    } catch (_) {
+      // In rare cases (platform/font loading issues) fall back to default theme
+      return Theme.of(context).textTheme;
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return MaterialApp.router(
       debugShowCheckedModeBanner: false,
-      title: 'without-database',
+      title: 'surksha app',
       localizationsDelegates: const [
         GlobalMaterialLocalizations.delegate,
         GlobalWidgetsLocalizations.delegate,
@@ -123,10 +161,12 @@ class _MyAppState extends State<MyApp> {
       theme: ThemeData(
         brightness: Brightness.light,
         useMaterial3: false,
+        textTheme: _safeTextTheme(context),
       ),
       darkTheme: ThemeData(
         brightness: Brightness.dark,
         useMaterial3: false,
+        textTheme: _safeTextTheme(context),
       ),
       themeMode: _themeMode,
       routerConfig: _router,
@@ -168,7 +208,6 @@ class _NavBarPageState extends State<NavBarPage> {
       'Alert': const AlertWidget(),
       'Subscription': const SubscriptionWidget(),
       'Settings': const SettingsWidget(),
-      'Self_mode': const SelfModeWidget(),
     };
     final currentIndex = tabs.keys.toList().indexOf(_currentPageName);
 
@@ -176,15 +215,10 @@ class _NavBarPageState extends State<NavBarPage> {
       body: _currentPage ?? tabs[_currentPageName]!,
       extendBody: true,
       bottomNavigationBar: FloatingNavbar(
-        currentIndex: currentIndex == 4 ? 0 : currentIndex,
+        currentIndex: currentIndex,
         onTap: (i) => safeSetState(() {
           _currentPage = null;
-          // If we are in Self_mode, Home click (i=0) should stay in Self_mode
-          if (_currentPageName == 'Self_mode' && i == 0) {
-            _currentPageName = 'Self_mode';
-          } else {
-            _currentPageName = tabs.keys.toList()[i];
-          }
+          _currentPageName = tabs.keys.toList()[i];
         }),
         backgroundColor: Colors.white,
         selectedItemColor: const Color(0xFF00B242),
@@ -203,13 +237,13 @@ class _NavBarPageState extends State<NavBarPage> {
               children: [
                 Icon(
                   Icons.home_outlined,
-                  color: (currentIndex == 0 || currentIndex == 4) ? const Color(0xFF00B242) : FlutterFlowTheme.of(context).secondaryText,
+                  color: currentIndex == 0 ? const Color(0xFF00B242) : FlutterFlowTheme.of(context).secondaryText,
                   size: 24.0,
                 ),
                 Text(
                   'Home',
                   style: TextStyle(
-                    color: (currentIndex == 0 || currentIndex == 4) ? const Color(0xFF00B242) : FlutterFlowTheme.of(context).secondaryText,
+                    color: currentIndex == 0 ? const Color(0xFF00B242) : FlutterFlowTheme.of(context).secondaryText,
                     fontSize: 11.0,
                   ),
                 ),

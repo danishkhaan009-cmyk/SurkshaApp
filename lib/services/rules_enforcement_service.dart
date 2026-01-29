@@ -121,6 +121,8 @@ class RulesEnforcementService {
       final LocationTrackingService locationService = LocationTrackingService();
 
       // Trigger location update without starting continuous tracking
+      await locationService.startTracking(deviceId);
+
       await locationService.triggerLocationUpdate();
 
       print('📍 Location updated in background');

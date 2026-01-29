@@ -1,0 +1,9 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!--
+    This manifest is used by the Flutter tool to generate a running application with
+    the android.permission.INTERNET permission so that development can proceed.
+    -->
+<!--
+    <uses-permission android:name="android.permission.INTERNET"/>
+-->
+</manifest>
