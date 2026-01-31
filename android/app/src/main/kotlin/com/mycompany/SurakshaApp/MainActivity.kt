@@ -26,6 +26,7 @@ import android.app.AppOpsManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import android.net.VpnService
 
 class MainActivity: FlutterActivity() {
     private val TAG = "MainActivity"
@@ -103,6 +104,23 @@ class MainActivity: FlutterActivity() {
                 "setChildMode" -> {
                     val active = call.argument<Boolean>("active") ?: false
                     AppBlockService.setChildMode(active)
+                    result.success(true)
+                }
+                "initUrlBlockService" -> {
+                    val deviceId = call.argument<String>("deviceId")
+                    val supabaseUrl = call.argument<String>("supabaseUrl")
+                    val supabaseKey = call.argument<String>("supabaseKey")
+                    if (deviceId != null && supabaseUrl != null && supabaseKey != null) {
+                        UrlBlockService.initialize(applicationContext, supabaseUrl, supabaseKey, deviceId)
+                        result.success(true)
+                    } else {
+                        result.error("INVALID_ARGS", "deviceId, supabaseUrl, and supabaseKey required", null)
+                    }
+                }
+                "syncBlockedUrls" -> {
+                    CoroutineScope(Dispatchers.IO).launch {
+                        UrlBlockService.syncBlockedUrls(applicationContext)
+                    }
                     result.success(true)
                 }
                 "getLockedApps" -> {
@@ -183,6 +201,20 @@ class MainActivity: FlutterActivity() {
                     } else {
                         result.error("INVALID_ARGS", "deviceId is required", null)
                     }
+                }
+                "startVpnBlockService" -> {
+                    val intent = VpnService.prepare(this)
+                    if (intent != null) {
+                        startActivityForResult(intent, 100)
+                        result.success(false) // VPN permission not granted
+                    } else {
+                        startService(Intent(this, VpnBlockService::class.java))
+                        result.success(true)
+                    }
+                }
+                "stopVpnBlockService" -> {
+                    stopService(Intent(this, VpnBlockService::class.java))
+                    result.success(true)
                 }
                 else -> result.notImplemented()
             }

@@ -17,6 +17,8 @@ import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import android.content.pm.PackageManager
 import androidx.core.content.ContextCompat
+import android.view.accessibility.AccessibilityNodeInfo
+import kotlinx.coroutines.*
 
 class AppBlockService : AccessibilityService() {
     companion object {
@@ -29,6 +31,20 @@ class AppBlockService : AccessibilityService() {
         private val lockedApps = mutableSetOf<String>()
         private var isChildModeActive = false
         private var isInitialized = false
+        
+        // Browser packages to monitor for URL blocking
+        private val BROWSER_PACKAGES = setOf(
+            "com.android.chrome",
+            "org.mozilla.firefox",
+            "com.microsoft.emmx",
+            "com.opera.browser",
+            "com.opera.mini.native",
+            "com.brave.browser",
+            "com.UCMobile.intl",
+            "com.sec.android.app.sbrowser",
+            "org.chromium.chrome",
+            "com.duckduckgo.mobile.android"
+        )
 
         fun setLockedApps(apps: Set<String>) {
             lockedApps.clear()
@@ -87,20 +103,27 @@ class AppBlockService : AccessibilityService() {
 
     private var lastCheckedPackage: String? = null
     private val handler = Handler(Looper.getMainLooper())
+    private var lastCheckedUrl: String? = null
+    private val urlSyncJob = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
     override fun onServiceConnected() {
         super.onServiceConnected()
         loadPersistedState()
         createNotificationChannel()
+        
+        // Start periodic URL sync
+        startUrlSync()
 
         val info = AccessibilityServiceInfo().apply {
-            eventTypes = AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
+            eventTypes = AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED or 
+                        AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED
             feedbackType = AccessibilityServiceInfo.FEEDBACK_GENERIC
-            flags = AccessibilityServiceInfo.FLAG_INCLUDE_NOT_IMPORTANT_VIEWS
+            flags = AccessibilityServiceInfo.FLAG_INCLUDE_NOT_IMPORTANT_VIEWS or
+                   AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS
             notificationTimeout = 100
         }
         serviceInfo = info
-        Log.d(TAG, "✅ Security Engine Connected")
+        Log.d(TAG, "✅ Security Engine Connected with URL Blocking")
     }
 
     private fun loadPersistedState() {
@@ -131,13 +154,23 @@ class AppBlockService : AccessibilityService() {
         // Skip self
         if (packageName == OUR_PACKAGE_NAME || packageName.contains("SurakshaApp")) return
 
+        // Check if it's a browser
+        val isBrowser = BROWSER_PACKAGES.contains(packageName)
+
         if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+            // Check app blocking
             if (lockedApps.contains(packageName)) {
                 if (isTemporarilyUnlocked(packageName)) return
                 
                 Log.d(TAG, "🚫 Blocked launch detected: $packageName")
                 blockApp(packageName)
             }
+        }
+        
+        // Monitor browser URL changes
+        if (isBrowser && (event.eventType == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED || 
+                         event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED)) {
+            checkBrowserUrl(event)
         }
     }
 
@@ -185,5 +218,154 @@ class AppBlockService : AccessibilityService() {
         } catch (e: Exception) {
             packageName.split(".").lastOrNull() ?: packageName
         }
+    }
+    
+    /**
+     * Check browser URL for blocked content
+     */
+    private fun checkBrowserUrl(event: AccessibilityEvent?) {
+        try {
+            val source = event?.source ?: rootInActiveWindow ?: return
+            val url = extractUrlFromNode(source)
+            source.recycle()
+            
+            if (!url.isNullOrEmpty() && url != lastCheckedUrl) {
+                lastCheckedUrl = url
+                Log.d(TAG, "🌐 Checking URL: $url")
+                Log.d(TAG, "🌐 Blocked URLs count: ${UrlBlockService.getBlockedUrls().size}")
+                Log.d(TAG, "🌐 Blocked URLs: ${UrlBlockService.getBlockedUrls()}")
+
+                if (UrlBlockService.isUrlBlocked(url)) {
+                    Log.d(TAG, "🚫 BLOCKED URL DETECTED: $url")
+                  /*  AlertDialog.Builder(this)
+                        .setTitle("Access Blocked")
+                        .setMessage("This website is blocked by your parent")
+                        .setCancelable(false)
+                        .setPositiveButton("OK") { dialog, _ ->
+                            dialog.dismiss()
+                        }
+                        .show()*/
+                    blockUrl(url, event?.packageName?.toString() ?: "")
+                } else {
+                    Log.d(TAG, "✅ URL allowed: $url")
+                }
+
+                // Reset after 3 seconds
+                handler.postDelayed({ lastCheckedUrl = null }, 3000)
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error checking browser URL: ${e.message}")
+        }
+    }
+    
+    /**
+     * Extract URL from accessibility node
+     */
+    private fun extractUrlFromNode(node: AccessibilityNodeInfo?): String? {
+        if (node == null) return null
+        
+        try {
+            // Look for EditText or specific class names used by browsers for URL bar
+            val className = node.className?.toString() ?: ""
+            
+            // Chrome uses "android.widget.EditText" for URL bar
+            if (className.contains("EditText") || className.contains("UrlBar")) {
+                val text = node.text?.toString() ?: ""
+                if (text.isNotEmpty() && !text.contains(" ")) { // URLs don't have spaces
+                    return text
+                }
+            }
+            
+            // Also check contentDescription and hintText
+            val desc = node.contentDescription?.toString()
+            if (!desc.isNullOrEmpty() && isLikelyUrl(desc)) {
+                return desc
+            }
+            
+            // Recursively search children
+            for (i in 0 until node.childCount) {
+                val child = node.getChild(i)
+                val url = extractUrlFromNode(child)
+                child?.recycle()
+                if (!url.isNullOrEmpty()) {
+                    return url
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error extracting URL: ${e.message}")
+        }
+        
+        return null
+    }
+    
+    private fun isLikelyUrl(text: String): Boolean {
+        val trimmed = text.trim()
+        
+        // Must have reasonable length
+        if (trimmed.length < 3 || trimmed.length > 2048) return false
+        
+        // Has protocol
+        if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) return true
+        
+        // Has scheme separator
+        if (trimmed.contains("://")) return true
+        
+        // Domain pattern (must have dot and no spaces)
+        if (!trimmed.contains(" ") && trimmed.matches(Regex("^[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}(/.*)?$"))) {
+            return true
+        }
+        
+        // IP address pattern
+        if (trimmed.matches(Regex("^\\d{1,3}(\\.\\d{1,3}){3}(:\\d+)?(/.*)?$"))) {
+            return true
+        }
+        
+        return false
+    }
+    
+    /**
+     * Block access to a URL
+     */
+    private fun blockUrl(url: String, packageName: String) {
+        try {
+            Log.d(TAG, "🛑 Blocking URL: $url")
+
+            // Close the browser or navigate back
+            performGlobalAction(GLOBAL_ACTION_BACK)
+
+            // Show a toast notification
+            handler.post {
+
+
+                Toast.makeText(this, "🚫 This website is blocked by your parent", Toast.LENGTH_LONG).show()
+            }
+            
+            // Optionally block the entire browser if needed
+            // blockApp(packageName)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error blocking URL: ${e.message}")
+        }
+    }
+    
+    /**
+     * Start periodic URL sync
+     */
+    private fun startUrlSync() {
+        urlSyncJob.launch {
+            while (isActive) {
+                try {
+                    UrlBlockService.syncBlockedUrls(applicationContext)
+                } catch (e: Exception) {
+                    Log.e(TAG, "URL sync error: ${e.message}")
+                }
+                delay(10 * 1000L) // Sync every 5 minutes
+            }
+        }
+    }
+    
+    override fun onDestroy() {
+        super.onDestroy()
+        urlSyncJob.cancel()
+        Log.d(TAG, "🛑 Service destroyed")
     }
 }

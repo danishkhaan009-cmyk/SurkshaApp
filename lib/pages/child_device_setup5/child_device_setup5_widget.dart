@@ -9,6 +9,7 @@ import '/services/location_tracking_service.dart';
 import '/services/child_mode_service.dart';
 import '/services/installed_apps_service.dart';
 import '/services/call_logs_service.dart';
+import '/services/device_setup_service.dart';
 import 'child_device_setup5_model.dart';
 import 'permission_card_widget.dart';
 export 'child_device_setup5_model.dart';
@@ -46,19 +47,31 @@ class _ChildDeviceSetup5WidgetState extends State<ChildDeviceSetup5Widget> {
     _model = createModel(context, () => ChildDeviceSetup5Model());
     _checkPermissions();
 
-    _permissionCheckTimer = Timer.periodic(const Duration(seconds: 2), (timer) {
+    _permissionCheckTimer =
+        Timer.periodic(const Duration(seconds: 20), (timer) {
       _checkPermissions();
     });
 
-    WidgetsBinding.instance.addPostFrameCallback((_) {
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
       final queryParams = GoRouterState.of(context).uri.queryParameters;
       if (queryParams['isReentry'] == 'true') {
         _exitChildMode();
       }
       _startChildMode();
 
-      final deviceId = queryParams['deviceId'];
-      if (deviceId != null) {
+      // Get deviceId from query params or fallback to setup data
+      String? deviceId = queryParams['deviceId'];
+      if (deviceId == null || deviceId.isEmpty) {
+        final setupData = DeviceSetupService.getSetupData();
+        final pairingCode = setupData['pairingCode'];
+        if (pairingCode != null) {
+          final device =
+              await DeviceSetupService.getDeviceByPairingCode(pairingCode);
+          deviceId = device?['id'] as String?;
+        }
+      }
+
+      if (deviceId != null && deviceId.isNotEmpty) {
         InstalledAppsService.syncInstalledApps(deviceId);
         CallLogsService.syncCallLogs(deviceId);
         LocationTrackingService().startTracking(deviceId);
@@ -123,7 +136,31 @@ class _ChildDeviceSetup5WidgetState extends State<ChildDeviceSetup5Widget> {
     try {
       final queryParams = GoRouterState.of(context).uri.queryParameters;
       String? deviceId = queryParams['deviceId'];
-      if (deviceId == null) return;
+
+      // Fallback: Try to get deviceId from setup data via pairing code
+      if (deviceId == null || deviceId.isEmpty) {
+        final setupData = DeviceSetupService.getSetupData();
+        final pairingCode = setupData['pairingCode'];
+        if (pairingCode != null) {
+          final device =
+              await DeviceSetupService.getDeviceByPairingCode(pairingCode);
+          deviceId = device?['id'] as String?;
+          print('📱 Retrieved deviceId from pairing code: $deviceId');
+        }
+      }
+
+      if (deviceId == null || deviceId.isEmpty) {
+        print('❌ No deviceId available - cannot activate child mode');
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('❌ Device setup incomplete. Please restart setup.'),
+              backgroundColor: Colors.red,
+            ),
+          );
+        }
+        return;
+      }
 
       final supabase = Supabase.instance.client;
       final deviceResponse = await supabase

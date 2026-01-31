@@ -1,12 +1,15 @@
 import 'dart:async';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:flutter/services.dart';
 
 /// Service to handle URL blocking enforcement on child devices
 class UrlBlockingService {
   static final UrlBlockingService _instance = UrlBlockingService._internal();
   factory UrlBlockingService() => _instance;
   UrlBlockingService._internal();
+
+  static const platform = MethodChannel('parental_control/permissions');
 
   // Cached blocked URLs for quick lookup
   Set<String> _blockedUrls = {};
@@ -24,10 +27,50 @@ class UrlBlockingService {
   /// Initialize the URL blocking service for a device
   Future<void> initialize(String deviceId) async {
     _deviceId = deviceId;
+    print('🔒 Initializing URL Blocking Service for device: $deviceId');
     await _loadBlockedUrls();
+    await _initializeNativeService();
+    // Force immediate sync after initialization
+    await _syncNative();
+    _setupRealtimeSubscription();
     _startPeriodicSync();
     _isInitialized = true;
-    print('🔒 URL Blocking Service initialized for device: $deviceId');
+    print(
+        '🔒 URL Blocking Service initialized with ${_blockedUrls.length} URLs');
+  }
+
+  /// Initialize the native Android URL blocking service
+  Future<void> _initializeNativeService() async {
+    try {
+      // Hardcode the Supabase credentials since headers might not have them
+      const supabaseUrl = 'https://myxdypywnifdsaorlhsy.supabase.co';
+      const supabaseKey =
+          'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im15eGR5cHl3bmlmZHNhb3JsaHN5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjUxMjQ1MDUsImV4cCI6MjA4MDcwMDUwNX0.biZRTsavn04B3NIfNPPlIwDuabArdR-CFdohYEWSdz8';
+
+      print('🔑 Initializing native URL service with deviceId: $_deviceId');
+      print('🔑 Supabase URL: $supabaseUrl');
+      print('🔑 Key length: ${supabaseKey.length}');
+
+      await platform.invokeMethod('initUrlBlockService', {
+        'deviceId': _deviceId,
+        'supabaseUrl': supabaseUrl,
+        'supabaseKey': supabaseKey,
+      });
+
+      print('✅ Native URL blocking service initialized');
+    } catch (e) {
+      print('❌ Failed to initialize native URL blocking: $e');
+    }
+  }
+
+  /// Trigger native sync
+  Future<void> _syncNative() async {
+    try {
+      await platform.invokeMethod('syncBlockedUrls');
+      print('🔄 Triggered native URL sync');
+    } catch (e) {
+      print('⚠️ Failed to trigger native sync: $e');
+    }
   }
 
   /// Load blocked URLs from Supabase
@@ -35,11 +78,32 @@ class UrlBlockingService {
     if (_deviceId == null) return;
 
     try {
+      print('📡 Fetching blocked URLs for device ID: $_deviceId');
+
+      // Debug: Check what blocked URLs exist in the database
+      try {
+        final allBlockedUrls = await Supabase.instance.client
+            .from('blocked_urls')
+            .select('device_id, url, is_active')
+            .eq('is_active', true)
+            .limit(20);
+        print('🔍 DEBUG - All active blocked URLs in database:');
+        for (var item in allBlockedUrls) {
+          print('   Device: ${item['device_id']} -> URL: ${item['url']}');
+        }
+        print('🔍 DEBUG - Current child device ID: $_deviceId');
+      } catch (e) {
+        print('⚠️ Debug query failed: $e');
+      }
+
       final response = await Supabase.instance.client
           .from('blocked_urls')
           .select('url')
           .eq('device_id', _deviceId!)
           .eq('is_active', true);
+
+      print('📡 Supabase response: $response');
+      print('📡 Found ${response.length} blocked URLs for this device');
 
       _blockedUrls.clear();
       _blockedDomains.clear();
@@ -47,6 +111,7 @@ class UrlBlockingService {
       for (var item in response) {
         final url = item['url'] as String;
         _blockedUrls.add(url.toLowerCase());
+        print('🚫 Blocked URL added: $url');
 
         // Extract domain for domain-level blocking
         final domain = _extractDomain(url);
@@ -58,7 +123,11 @@ class UrlBlockingService {
       // Cache locally for offline access
       await _cacheBlockedUrls();
 
-      print('✅ Loaded ${_blockedUrls.length} blocked URLs');
+      // Sync with native service
+      await _syncNative();
+
+      print(
+          '✅ Loaded ${_blockedUrls.length} blocked URLs for device: $_deviceId');
     } catch (e) {
       print('❌ Failed to load blocked URLs: $e');
       // Try to load from cache
@@ -124,7 +193,7 @@ class UrlBlockingService {
   /// Start periodic sync with Supabase
   void _startPeriodicSync() {
     _syncTimer?.cancel();
-    _syncTimer = Timer.periodic(const Duration(minutes: 5), (timer) {
+    _syncTimer = Timer.periodic(const Duration(seconds: 30), (timer) {
       _loadBlockedUrls();
     });
   }
@@ -213,4 +282,33 @@ class UrlBlockingService {
     _isInitialized = false;
     print('🔒 URL Blocking Service disposed');
   }
+
+  void _setupRealtimeSubscription() {
+    if (_deviceId == null) return;
+
+    Supabase.instance.client
+        .from('blocked_urls')
+        .stream(primaryKey: ['id'])
+        .eq('device_id', _deviceId!)
+        .listen((data) async {
+          print('🔴 Real-time: URL list updated, syncing...');
+          await _loadBlockedUrls();
+          await _syncNative();
+        });
+  }
+
+  /*void _setupRealtimeSubscription() {
+    if (_deviceId == null) return;
+
+    Supabase.instance.client
+        .from('blocked_urls')
+        .stream(primaryKey: ['id'])
+        .eq('device_id', _deviceId as Object)
+        .eq('is_active', true)
+        .listen((data) async {
+          print('🔴 Real-time: URL list updated, syncing...');
+          await _loadBlockedUrls();
+          await _syncNative();
+        });
+  }*/
 }

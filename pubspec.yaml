@@ -95,5 +95,7 @@ flutter:
 
   assets:
     - assets/
-    - assets/fonts/
+    - assets/fonts/Poppins-Regular.ttf
+    - assets/fonts/Poppins-SemiBold.ttf
+
 

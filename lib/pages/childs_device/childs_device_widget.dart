@@ -587,7 +587,7 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
                                     50.0, 0.0, 50.0, 0.0),
                               ),
                               Tab(
-                                text: 'VPN',
+                                text: 'URL Blocker',
                                 icon: Icon(
                                   Icons.vpn_lock_outlined,
                                 ),
@@ -2965,6 +2965,7 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
         return;
       }
 
+      print('🔒 Blocking URL for device ID: ${widget.deviceId}');
       await Supabase.instance.client.from('blocked_urls').insert({
         'device_id': widget.deviceId,
         'url': cleanUrl,
@@ -2972,7 +2973,7 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
         'is_active': true,
       });
 
-      print('✅ URL blocked: $cleanUrl');
+      print('✅ URL blocked: $cleanUrl for device: ${widget.deviceId}');
       _urlInputController.clear();
       await _fetchBlockedUrls();
 
