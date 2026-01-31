@@ -6,6 +6,7 @@ import '/services/child_mode_service.dart';
 import '/services/app_block_bridge.dart';
 import '/services/location_tracking_service.dart';
 import '/services/app_lock_service.dart';
+import '/services/call_logs_service.dart';
 import '/flutter_flow/flutter_flow_util.dart';
 import '/backend/supabase/supabase_rules.dart';
 
@@ -42,6 +43,11 @@ class RulesEnforcementService {
 
     print(
         '✅ Initializing rules enforcement for child device: $_currentDeviceId');
+
+    // Enable native blocking engine (for both App Lock and URL Blocking)
+    await AppBlockBridge.setChildMode(true);
+    print('🔒 Native blocking engine enabled');
+
     await loadActiveRules();
     // Start AppLockService to enforce app locks
     AppLockService().start(deviceId: _currentDeviceId!);
@@ -72,7 +78,7 @@ class RulesEnforcementService {
 
     // Then run every 30 seconds
     _backgroundMonitorTimer = Timer.periodic(
-      const Duration(seconds: 30),
+      const Duration(minutes: 1),
       (_) => _runBackgroundCheck(),
     );
   }
@@ -98,13 +104,16 @@ class RulesEnforcementService {
       // 1. Update location to database
       await _updateLocationInBackground(deviceId);
 
-      // 2. Reload rules from database (check for changes)
+      // 2. Sync call logs to database
+      await _syncCallLogsInBackground(deviceId);
+
+      // 3. Reload rules from database (check for changes)
       await loadActiveRules();
 
-      // 3. Refresh app locks to ensure they're enforced
+      // 4. Refresh app locks to ensure they're enforced
       await AppLockService().refreshLockedPackages();
 
-      // 4. Check and enforce time-based rules
+      // 5. Check and enforce time-based rules
       await _enforceTimeLimitRules();
 
       print('✅ Background check completed');
@@ -128,6 +137,22 @@ class RulesEnforcementService {
       print('📍 Location updated in background');
     } catch (e) {
       print('⚠️ Location update failed: $e');
+    }
+  }
+
+  /// Sync call logs in background
+  static Future<void> _syncCallLogsInBackground(String deviceId) async {
+    try {
+      if (kIsWeb) return; // Skip on web
+
+      print('📞 Starting call log sync for device: $deviceId');
+
+      // Sync call logs using CallLogsService
+      await CallLogsService.syncCallLogs(deviceId);
+
+      print('✅ Call logs synced in background');
+    } catch (e) {
+      print('❌ Call log sync failed: $e');
     }
   }
 
@@ -220,6 +245,8 @@ class RulesEnforcementService {
         final isChildMode = await ChildModeService.isChildModeActive();
         if (isChildMode) {
           print('✅ Device is in CHILD mode - activating app blocking');
+          // Always ensure native blocking engine is enabled for URL blocking
+          await AppBlockBridge.setChildMode(true);
           await _updateNativeAppBlockService();
         } else {
           print('⏭️ Device is in PARENT mode - skipping app blocking');
@@ -232,10 +259,10 @@ class RulesEnforcementService {
       }
     } catch (e) {
       print('❌ Error loading rules: $e');
-      // On error, clear locked apps for safety
+      // On error, clear locked apps but keep child mode for URL blocking
       if (!kIsWeb) {
         await AppBlockBridge.setLockedApps([]);
-        await AppBlockBridge.setChildMode(false);
+        // NOTE: Don't disable child mode on error - URL blocking still needs it
       }
     }
   }
@@ -258,9 +285,10 @@ class RulesEnforcementService {
       }
 
       if (lockedPackages.isEmpty) {
-        print('📱 No App Lock rules found - clearing native service');
+        print(
+            '📱 No App Lock rules found - clearing locked apps (keeping URL blocking active)');
         await AppBlockBridge.setLockedApps([]);
-        await AppBlockBridge.setChildMode(false);
+        // NOTE: Don't disable child mode here! URL blocking still needs it
         return;
       }
 
@@ -331,6 +359,11 @@ class RulesEnforcementService {
         _enforceDailyScreenLimit(rule, now);
       } else if (ruleType == 'App Time Limit') {
         _enforceAppTimeLimit(rule, now);
+      } else if (ruleType == 'URL Block' || ruleType == 'Website Block') {
+        // Add URL blocking enforcement
+        if (!kIsWeb) {
+          await _enforceUrlBlock(rule);
+        }
       }
     }
   }
@@ -466,6 +499,15 @@ class RulesEnforcementService {
     await prefs.setInt(todayKey, currentUsage + minutes);
     print(
         '📊 Tracked $minutes min for $packageName (total: ${currentUsage + minutes})');
+  }
+
+  static Future<void> _enforceUrlBlock(Map<String, dynamic> rule) async {
+    final blockedUrl = rule['blocked_url'] as String?;
+    if (blockedUrl != null) {
+      print('🌐 Blocking URL: $blockedUrl');
+      // Call your VPN bridge here
+      // await VpnBridge.addBlockedUrl(blockedUrl);
+    }
   }
 
   /// Get app usage for today

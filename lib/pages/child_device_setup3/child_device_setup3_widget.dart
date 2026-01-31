@@ -1401,7 +1401,7 @@ class _ChildDeviceSetup3WidgetState extends State<ChildDeviceSetup3Widget> {
                                     // Create device in Supabase (if not already created in Setup2)
                                     try {
                                       // Check if device already exists
-                                      final existingDevice =
+                                      var existingDevice =
                                           await DeviceSetupService
                                               .getDeviceByPairingCode(
                                                   setupData['pairingCode'] ??
@@ -1409,8 +1409,9 @@ class _ChildDeviceSetup3WidgetState extends State<ChildDeviceSetup3Widget> {
 
                                       if (existingDevice == null) {
                                         // Only create if it doesn't exist
-                                        await DeviceSetupService
-                                            .createChildDevice(
+                                        existingDevice =
+                                            await DeviceSetupService
+                                                .createChildDevice(
                                           childName:
                                               setupData['childName'] ?? '',
                                           childAge: setupData['childAge'] ?? '',
@@ -1420,9 +1421,23 @@ class _ChildDeviceSetup3WidgetState extends State<ChildDeviceSetup3Widget> {
                                         );
                                       }
 
+                                      // Get the device ID to pass to next screen
+                                      final deviceId =
+                                          existingDevice['id'] as String?;
+
+                                      // Store deviceId in setup data for later use
+                                      DeviceSetupService.storeSetupData(
+                                        childName: setupData['childName'],
+                                        childAge: setupData['childAge'],
+                                        pairingCode: setupData['pairingCode'],
+                                      );
+
                                       if (!mounted) return;
                                       context.pushNamed(
-                                          ChildDeviceSetup4Widget.routeName);
+                                          ChildDeviceSetup4Widget.routeName,
+                                          queryParameters: {
+                                            'deviceId': deviceId ?? '',
+                                          });
                                     } catch (e) {
                                       if (!mounted) return;
                                       ScaffoldMessenger.of(context)

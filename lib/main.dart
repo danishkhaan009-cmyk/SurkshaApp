@@ -10,6 +10,7 @@ import 'package:floating_bottom_navigation_bar/floating_bottom_navigation_bar.da
 import 'index.dart';
 import '/services/location_tracking_service.dart';
 import '/services/child_mode_service.dart';
+import '/services/url_blocking_service.dart';
 import 'package:flutter/services.dart' show rootBundle;
 
 void main() async {
@@ -19,7 +20,9 @@ void main() async {
 
   // Configure Google Fonts - wrap in try-catch to handle AssetManifest errors
   try {
-    GoogleFonts.config.allowRuntimeFetching = true;
+    // Disable google_fonts network fetching, use bundled fonts only
+    GoogleFonts.config.allowRuntimeFetching = false;
+    // GoogleFonts.config.allowRuntimeFetching = true;
   } catch (e) {
     print('⚠️ Google Fonts config failed: $e');
   }
@@ -62,7 +65,8 @@ class MyApp extends StatefulWidget {
   @override
   State<MyApp> createState() => _MyAppState();
 
-  static _MyAppState of(BuildContext context) => context.findAncestorStateOfType<_MyAppState>()!;
+  static _MyAppState of(BuildContext context) =>
+      context.findAncestorStateOfType<_MyAppState>()!;
 }
 
 class _MyAppState extends State<MyApp> {
@@ -75,12 +79,18 @@ class _MyAppState extends State<MyApp> {
   bool _assetManifestExists = true;
 
   String getRoute([RouteMatch? routeMatch]) {
-    final RouteMatch lastMatch = routeMatch ?? _router.routerDelegate.currentConfiguration.last;
-    final RouteMatchList matchList = lastMatch is ImperativeRouteMatch ? lastMatch.matches : _router.routerDelegate.currentConfiguration;
+    final RouteMatch lastMatch =
+        routeMatch ?? _router.routerDelegate.currentConfiguration.last;
+    final RouteMatchList matchList = lastMatch is ImperativeRouteMatch
+        ? lastMatch.matches
+        : _router.routerDelegate.currentConfiguration;
     return matchList.uri.toString();
   }
 
-  List<String> getRouteStack() => _router.routerDelegate.currentConfiguration.matches.map((e) => getRoute(e)).toList();
+  List<String> getRouteStack() =>
+      _router.routerDelegate.currentConfiguration.matches
+          .map((e) => getRoute(e))
+          .toList();
 
   @override
   void initState() {
@@ -102,7 +112,13 @@ class _MyAppState extends State<MyApp> {
       final deviceId = await ChildModeService.getChildDeviceId();
       print("isChildMode Active:  $isChildMode");
       if (isChildMode && deviceId != null && deviceId.isNotEmpty) {
-        print('✅ Child device detected: $deviceId - Resuming background monitoring');
+        print(
+            '✅ Child device detected: $deviceId - Resuming background monitoring');
+
+        // Initialize URL blocking service
+        await UrlBlockingService().initialize(deviceId);
+        print('✅ URL Blocking Service initialized on app start');
+
         WidgetsBinding.instance.addPostFrameCallback((_) async {
           if (mounted) {
             await RulesEnforcementService.initialize(context);
@@ -237,13 +253,17 @@ class _NavBarPageState extends State<NavBarPage> {
               children: [
                 Icon(
                   Icons.home_outlined,
-                  color: currentIndex == 0 ? const Color(0xFF00B242) : FlutterFlowTheme.of(context).secondaryText,
+                  color: currentIndex == 0
+                      ? const Color(0xFF00B242)
+                      : FlutterFlowTheme.of(context).secondaryText,
                   size: 24.0,
                 ),
                 Text(
                   'Home',
                   style: TextStyle(
-                    color: currentIndex == 0 ? const Color(0xFF00B242) : FlutterFlowTheme.of(context).secondaryText,
+                    color: currentIndex == 0
+                        ? const Color(0xFF00B242)
+                        : FlutterFlowTheme.of(context).secondaryText,
                     fontSize: 11.0,
                   ),
                 ),
@@ -256,13 +276,17 @@ class _NavBarPageState extends State<NavBarPage> {
               children: [
                 Icon(
                   Icons.notifications_outlined,
-                  color: currentIndex == 1 ? const Color(0xFF00B242) : FlutterFlowTheme.of(context).secondaryText,
+                  color: currentIndex == 1
+                      ? const Color(0xFF00B242)
+                      : FlutterFlowTheme.of(context).secondaryText,
                   size: 24.0,
                 ),
                 Text(
                   'Alert',
                   style: TextStyle(
-                    color: currentIndex == 1 ? const Color(0xFF00B242) : FlutterFlowTheme.of(context).secondaryText,
+                    color: currentIndex == 1
+                        ? const Color(0xFF00B242)
+                        : FlutterFlowTheme.of(context).secondaryText,
                     fontSize: 11.0,
                   ),
                 ),
@@ -275,13 +299,17 @@ class _NavBarPageState extends State<NavBarPage> {
               children: [
                 Icon(
                   Icons.currency_rupee,
-                  color: currentIndex == 2 ? const Color(0xFF00B242) : FlutterFlowTheme.of(context).secondaryText,
+                  color: currentIndex == 2
+                      ? const Color(0xFF00B242)
+                      : FlutterFlowTheme.of(context).secondaryText,
                   size: 24.0,
                 ),
                 Text(
                   'Subscription',
                   style: TextStyle(
-                    color: currentIndex == 2 ? const Color(0xFF00B242) : FlutterFlowTheme.of(context).secondaryText,
+                    color: currentIndex == 2
+                        ? const Color(0xFF00B242)
+                        : FlutterFlowTheme.of(context).secondaryText,
                     fontSize: 11.0,
                   ),
                 ),
@@ -294,13 +322,17 @@ class _NavBarPageState extends State<NavBarPage> {
               children: [
                 Icon(
                   Icons.settings_outlined,
-                  color: currentIndex == 3 ? const Color(0xFF00B242) : FlutterFlowTheme.of(context).secondaryText,
+                  color: currentIndex == 3
+                      ? const Color(0xFF00B242)
+                      : FlutterFlowTheme.of(context).secondaryText,
                   size: 24.0,
                 ),
                 Text(
                   'Settings',
                   style: TextStyle(
-                    color: currentIndex == 3 ? const Color(0xFF00B242) : FlutterFlowTheme.of(context).secondaryText,
+                    color: currentIndex == 3
+                        ? const Color(0xFF00B242)
+                        : FlutterFlowTheme.of(context).secondaryText,
                     fontSize: 11.0,
                   ),
                 ),

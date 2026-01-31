@@ -1692,10 +1692,30 @@ class _ChildDeviceSetup4WidgetState extends State<ChildDeviceSetup4Widget> {
           ),
         );
 
+        // Get deviceId from query params or setup data
+        final queryParams = GoRouterState.of(context).uri.queryParameters;
+        String? deviceId = queryParams['deviceId'];
+
+        // If not in query params, try to get from setup data via pairing code
+        if (deviceId == null || deviceId.isEmpty) {
+          final setupData = DeviceSetupService.getSetupData();
+          final pairingCode = setupData['pairingCode'];
+          if (pairingCode != null) {
+            final device =
+                await DeviceSetupService.getDeviceByPairingCode(pairingCode);
+            deviceId = device?['id'] as String?;
+          }
+        }
+
         // Navigate to next screen after short delay
         await Future.delayed(const Duration(milliseconds: 500));
         if (!mounted) return;
-        context.pushNamed('Child_Device_Setup5');
+        context.pushNamed(
+          'Child_Device_Setup5',
+          queryParameters: {
+            'deviceId': deviceId ?? '',
+          },
+        );
       } else if (locationStatus.isPermanentlyDenied ||
           (locationAlwaysStatus?.isPermanentlyDenied ?? false)) {
         if (!mounted) return;

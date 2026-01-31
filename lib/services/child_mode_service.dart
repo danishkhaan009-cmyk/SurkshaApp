@@ -1,10 +1,12 @@
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'url_blocking_service.dart';
 
 /// Service for managing child mode state persistence
 class ChildModeService {
   // Method channel for syncing with native Android
-  static const MethodChannel _channel = MethodChannel('parental_control/permissions');
+  static const MethodChannel _channel =
+      MethodChannel('parental_control/permissions');
   static const String _childModeKey = 'is_child_mode_active';
   static const String _deviceIdKey = 'child_device_id';
   static const String _childPinKey = 'child_exit_pin';
@@ -105,6 +107,14 @@ class ChildModeService {
 
     // Sync device ID to native Android SharedPreferences for LocationWorker
     await _syncDeviceIdToNative(deviceId);
+
+    // Initialize URL blocking service
+    try {
+      await UrlBlockingService().initialize(deviceId);
+      print('✅ URL Blocking Service initialized');
+    } catch (e) {
+      print('⚠️ Failed to initialize URL Blocking: $e');
+    }
 
     // Verify the save was successful
     final verified = await isChildModeActive();
