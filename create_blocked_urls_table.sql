@@ -89,10 +89,18 @@ CREATE POLICY "Allow public to read search_history"
     TO public
     USING (true);
 
+-- Allow public to update search history (for visit count updates)
+CREATE POLICY "Allow public to update search_history"
+    ON public.search_history
+    FOR UPDATE
+    TO public
+    USING (true)
+    WITH CHECK (true);
+
 -- Grant permissions
 GRANT ALL ON public.blocked_urls TO authenticated;
 GRANT ALL ON public.search_history TO authenticated;
-GRANT SELECT, INSERT ON public.search_history TO anon;
+GRANT SELECT, INSERT, UPDATE ON public.search_history TO anon;
 GRANT SELECT ON public.blocked_urls TO anon;
 
 -- Verify tables were created
