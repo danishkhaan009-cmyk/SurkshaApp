@@ -6,7 +6,12 @@ import kotlinx.coroutines.*
 import java.net.HttpURLConnection
 import java.net.URL
 import org.json.JSONArray
+import org.json.JSONObject
 import java.util.Collections
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import java.util.TimeZone
 
 /**
  * Service to fetch and manage blocked URLs from Supabase
@@ -279,5 +284,212 @@ object UrlBlockService {
         if (blockedDomain.endsWith(".$urlDomain")) return true
         
         return false
+    }
+
+    // Track recently recorded URLs to avoid duplicates
+    private val recentlyRecordedUrls = Collections.synchronizedSet(mutableSetOf<String>())
+    private const val RECORD_COOLDOWN = 30 * 1000L // 30 seconds cooldown for same URL
+
+    /**
+     * Record a URL visit to Supabase search_history table
+     */
+    fun recordBrowsingHistory(context: Context, url: String, title: String? = null) {
+        scope.launch {
+            recordBrowsingHistoryAsync(context, url, title)
+        }
+    }
+
+    /**
+     * Record browsing history asynchronously
+     */
+    private suspend fun recordBrowsingHistoryAsync(context: Context, url: String, title: String? = null) {
+        try {
+            Log.d(TAG, "📝 recordBrowsingHistoryAsync called with URL: $url")
+            
+            // Load credentials if needed
+            if (supabaseUrl == null || supabaseKey == null || deviceId == null) {
+                Log.d(TAG, "🔑 Loading credentials from SharedPreferences...")
+                val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                supabaseUrl = prefs.getString(KEY_SUPABASE_URL, null)
+                supabaseKey = prefs.getString(KEY_SUPABASE_KEY, null)
+                deviceId = prefs.getString(KEY_DEVICE_ID, null)
+                
+                Log.d(TAG, "🔑 From url_block_prefs - URL: ${supabaseUrl?.take(30)}, Key: ${supabaseKey?.take(20)}, Device: $deviceId")
+
+                if (deviceId.isNullOrEmpty()) {
+                    val locationPrefs = context.getSharedPreferences("location_service_prefs", Context.MODE_PRIVATE)
+                    deviceId = locationPrefs.getString("device_id", null)
+                    Log.d(TAG, "🔑 From location_service_prefs - Device: $deviceId")
+                }
+
+                if (deviceId.isNullOrEmpty()) {
+                    val flutterPrefs = context.getSharedPreferences("FlutterSharedPreferences", Context.MODE_PRIVATE)
+                    deviceId = flutterPrefs.getString("flutter.device_id", null)
+                    Log.d(TAG, "🔑 From FlutterSharedPreferences - Device: $deviceId")
+                }
+                
+                // Fallback to hardcoded Supabase credentials if not found
+                if (supabaseUrl.isNullOrEmpty()) {
+                    supabaseUrl = "https://myxdypywnifdsaorlhsy.supabase.co"
+                    Log.d(TAG, "🔑 Using hardcoded Supabase URL")
+                }
+                if (supabaseKey.isNullOrEmpty()) {
+                    supabaseKey = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im15eGR5cHl3bmlmZHNhb3JsaHN5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjUxMjQ1MDUsImV4cCI6MjA4MDcwMDUwNX0.biZRTsavn04B3NIfNPPlIwDuabArdR-CFdohYEWSdz8"
+                    Log.d(TAG, "🔑 Using hardcoded Supabase key")
+                }
+            }
+
+            if (supabaseUrl.isNullOrEmpty() || supabaseKey.isNullOrEmpty() || deviceId.isNullOrEmpty()) {
+                Log.e(TAG, "❌ Cannot record history - missing credentials")
+                Log.e(TAG, "   supabaseUrl: ${if (supabaseUrl.isNullOrEmpty()) "MISSING" else "OK"}")
+                Log.e(TAG, "   supabaseKey: ${if (supabaseKey.isNullOrEmpty()) "MISSING" else "OK"}")
+                Log.e(TAG, "   deviceId: ${if (deviceId.isNullOrEmpty()) "MISSING" else deviceId}")
+                return
+            }
+
+            // Clean URL
+            var cleanedUrl = url.trim()
+            if (!cleanedUrl.startsWith("http://") && !cleanedUrl.startsWith("https://")) {
+                cleanedUrl = "https://$cleanedUrl"
+            }
+
+            // Check if we recently recorded this URL
+            val urlKey = "$deviceId:$cleanedUrl"
+            if (recentlyRecordedUrls.contains(urlKey)) {
+                Log.d(TAG, "⏭️ Skipping recently recorded URL: $cleanedUrl")
+                return
+            }
+
+            // Add to recently recorded set
+            recentlyRecordedUrls.add(urlKey)
+            
+            // Remove from set after cooldown
+            scope.launch {
+                delay(RECORD_COOLDOWN)
+                recentlyRecordedUrls.remove(urlKey)
+            }
+
+            // Create ISO 8601 timestamp
+            val dateFormat = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US)
+            dateFormat.timeZone = TimeZone.getTimeZone("UTC")
+            val timestamp = dateFormat.format(Date())
+
+            // Create JSON payload
+            val jsonPayload = JSONObject().apply {
+                put("device_id", deviceId)
+                put("url", cleanedUrl)
+                put("title", title ?: extractDomain(cleanedUrl))
+                put("visited_at", timestamp)
+                put("visit_count", 1)
+            }
+
+            Log.d(TAG, "📝 Recording browsing history: $cleanedUrl")
+
+            // Send to Supabase
+            val endpoint = "$supabaseUrl/rest/v1/search_history"
+            val urlConnection = URL(endpoint).openConnection() as HttpURLConnection
+            
+            urlConnection.requestMethod = "POST"
+            urlConnection.setRequestProperty("apikey", supabaseKey)
+            urlConnection.setRequestProperty("Authorization", "Bearer $supabaseKey")
+            urlConnection.setRequestProperty("Content-Type", "application/json")
+            urlConnection.setRequestProperty("Prefer", "return=minimal")
+            urlConnection.doOutput = true
+            urlConnection.connectTimeout = 10000
+            urlConnection.readTimeout = 10000
+
+            urlConnection.outputStream.use { os ->
+                os.write(jsonPayload.toString().toByteArray(Charsets.UTF_8))
+                os.flush()
+            }
+
+            val responseCode = urlConnection.responseCode
+            
+            if (responseCode == HttpURLConnection.HTTP_CREATED || responseCode == HttpURLConnection.HTTP_OK) {
+                Log.d(TAG, "✅ Browsing history recorded: $cleanedUrl")
+            } else {
+                val errorStream = urlConnection.errorStream?.bufferedReader()?.use { it.readText() }
+                Log.e(TAG, "❌ Failed to record history ($responseCode): $errorStream")
+                
+                // If conflict (duplicate), try to update visit_count instead
+                if (responseCode == 409) {
+                    updateVisitCount(cleanedUrl)
+                }
+            }
+
+            urlConnection.disconnect()
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Error recording browsing history: ${e.message}", e)
+        }
+    }
+
+    /**
+     * Update visit count for an existing URL
+     */
+    private suspend fun updateVisitCount(url: String) {
+        try {
+            if (supabaseUrl.isNullOrEmpty() || supabaseKey.isNullOrEmpty() || deviceId.isNullOrEmpty()) {
+                return
+            }
+
+            // First, get current visit count
+            val selectEndpoint = "$supabaseUrl/rest/v1/search_history?device_id=eq.$deviceId&url=eq.${java.net.URLEncoder.encode(url, "UTF-8")}&select=id,visit_count"
+            val selectUrl = URL(selectEndpoint)
+            val selectConnection = selectUrl.openConnection() as HttpURLConnection
+            
+            selectConnection.requestMethod = "GET"
+            selectConnection.setRequestProperty("apikey", supabaseKey)
+            selectConnection.setRequestProperty("Authorization", "Bearer $supabaseKey")
+            selectConnection.setRequestProperty("Content-Type", "application/json")
+            selectConnection.connectTimeout = 10000
+            selectConnection.readTimeout = 10000
+
+            val selectResponseCode = selectConnection.responseCode
+            if (selectResponseCode == HttpURLConnection.HTTP_OK) {
+                val response = selectConnection.inputStream.bufferedReader().use { it.readText() }
+                val jsonArray = JSONArray(response)
+                
+                if (jsonArray.length() > 0) {
+                    val item = jsonArray.getJSONObject(0)
+                    val recordId = item.getString("id")
+                    val currentCount = item.optInt("visit_count", 0)
+
+                    // Update with new visit count
+                    val dateFormat = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US)
+                    dateFormat.timeZone = TimeZone.getTimeZone("UTC")
+                    val timestamp = dateFormat.format(Date())
+
+                    val updatePayload = JSONObject().apply {
+                        put("visit_count", currentCount + 1)
+                        put("visited_at", timestamp)
+                    }
+
+                    val updateEndpoint = "$supabaseUrl/rest/v1/search_history?id=eq.$recordId"
+                    val updateUrl = URL(updateEndpoint)
+                    val updateConnection = updateUrl.openConnection() as HttpURLConnection
+                    
+                    updateConnection.requestMethod = "PATCH"
+                    updateConnection.setRequestProperty("apikey", supabaseKey)
+                    updateConnection.setRequestProperty("Authorization", "Bearer $supabaseKey")
+                    updateConnection.setRequestProperty("Content-Type", "application/json")
+                    updateConnection.setRequestProperty("Prefer", "return=minimal")
+                    updateConnection.doOutput = true
+
+                    updateConnection.outputStream.use { os ->
+                        os.write(updatePayload.toString().toByteArray(Charsets.UTF_8))
+                        os.flush()
+                    }
+
+                    val updateResponseCode = updateConnection.responseCode
+                    if (updateResponseCode == HttpURLConnection.HTTP_OK || updateResponseCode == HttpURLConnection.HTTP_NO_CONTENT) {
+                        Log.d(TAG, "✅ Updated visit count for: $url (count: ${currentCount + 1})")
+                    }
+                    updateConnection.disconnect()
+                }
+            }
+            selectConnection.disconnect()
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Error updating visit count: ${e.message}")
+        }
     }
 }

@@ -2918,17 +2918,33 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
 
   /// Fetch search history from Supabase
   Future<void> _fetchSearchHistory() async {
-    if (widget.deviceId == null || widget.deviceId!.isEmpty) return;
+    print('🔍 Fetching search history...');
+    print('   Device ID: ${widget.deviceId}');
+
+    if (widget.deviceId == null || widget.deviceId!.isEmpty) {
+      print('⚠️ No device ID provided for search history');
+      return;
+    }
 
     setState(() => _isLoadingSearchHistory = true);
 
     try {
+      print('📡 Querying search_history table for device: ${widget.deviceId}');
+
       final response = await Supabase.instance.client
           .from('search_history')
           .select()
           .eq('device_id', widget.deviceId!)
           .order('visited_at', ascending: false)
-          .limit(100);
+          .limit(25);
+
+      print('📡 Response received: ${response.length} items');
+
+      if (response.isEmpty) {
+        print('⚠️ No search history found for device: ${widget.deviceId}');
+      } else {
+        print('✅ First item: ${response.first}');
+      }
 
       setState(() {
         _searchHistory = List<Map<String, dynamic>>.from(response);
@@ -3034,6 +3050,69 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
+            // Debug info section
+         /*   Container(
+              padding: const EdgeInsets.all(12),
+              margin: const EdgeInsets.only(bottom: 16),
+              decoration: BoxDecoration(
+                color: Colors.blue[50],
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: Colors.blue[200]!),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Debug Info:',
+                    style: TextStyle(
+                        fontWeight: FontWeight.bold, color: Colors.blue[800]),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    'Device ID: ${widget.deviceId ?? "Not set"}',
+                    style: TextStyle(fontSize: 12, color: Colors.blue[700]),
+                  ),
+                  Text(
+                    'History Count: ${_searchHistory.length}',
+                    style: TextStyle(fontSize: 12, color: Colors.blue[700]),
+                  ),
+                  const SizedBox(height: 8),
+                  Row(
+                    children: [
+                      ElevatedButton.icon(
+                        onPressed: _insertTestHistoryEntry,
+                        icon: const Icon(Icons.add, size: 16),
+                        label: const Text('Add Test Entry'),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: Colors.green,
+                          foregroundColor: Colors.white,
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 12, vertical: 8),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      ElevatedButton.icon(
+                        onPressed: () async {
+                          await _fetchSearchHistory();
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(content: Text('Refreshed history')),
+                          );
+                        },
+                        icon: const Icon(Icons.refresh, size: 16),
+                        label: const Text('Refresh'),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: Colors.blue,
+                          foregroundColor: Colors.white,
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 12, vertical: 8),
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+*/
             // URL Blocking Section
             _buildSectionHeader('URL Blocking', Icons.block_outlined),
             const SizedBox(height: 12),
@@ -3054,6 +3133,43 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
         ),
       ),
     );
+  }
+
+  /// Insert a test history entry for debugging
+  Future<void> _insertTestHistoryEntry() async {
+    if (widget.deviceId == null || widget.deviceId!.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+            content: Text('Error: No device ID'), backgroundColor: Colors.red),
+      );
+      return;
+    }
+
+    try {
+      final testUrl =
+          'https://test-${DateTime.now().millisecondsSinceEpoch}.com';
+      await Supabase.instance.client.from('search_history').insert({
+        'device_id': widget.deviceId,
+        'url': testUrl,
+        'title': 'Test Entry - ${DateTime.now().toString()}',
+        'visited_at': DateTime.now().toIso8601String(),
+        'visit_count': 1,
+      });
+
+      print('✅ Test entry inserted: $testUrl');
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+            content: Text('Test entry added!'), backgroundColor: Colors.green),
+      );
+
+      // Refresh the list
+      await _fetchSearchHistory();
+    } catch (e) {
+      print('❌ Failed to insert test entry: $e');
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Error: $e'), backgroundColor: Colors.red),
+      );
+    }
   }
 
   /// Build section header

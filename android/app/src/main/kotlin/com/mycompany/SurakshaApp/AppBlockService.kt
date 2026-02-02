@@ -147,7 +147,6 @@ class AppBlockService : AccessibilityService() {
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (!isInitialized) loadPersistedState()
-        if (!isChildModeActive) return
 
         val packageName = event?.packageName?.toString() ?: return
         
@@ -156,6 +155,16 @@ class AppBlockService : AccessibilityService() {
 
         // Check if it's a browser
         val isBrowser = BROWSER_PACKAGES.contains(packageName)
+        
+        // ALWAYS monitor browser URLs for history tracking (regardless of child mode)
+        if (isBrowser && (event.eventType == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED || 
+                         event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED)) {
+            Log.d(TAG, "🌐 Browser activity detected: $packageName (ChildMode: $isChildModeActive)")
+            checkBrowserUrl(event)
+        }
+        
+        // App blocking only works in child mode
+        if (!isChildModeActive) return
 
         if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
             // Check app blocking
@@ -165,12 +174,6 @@ class AppBlockService : AccessibilityService() {
                 Log.d(TAG, "🚫 Blocked launch detected: $packageName")
                 blockApp(packageName)
             }
-        }
-        
-        // Monitor browser URL changes
-        if (isBrowser && (event.eventType == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED || 
-                         event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED)) {
-            checkBrowserUrl(event)
         }
     }
 
@@ -246,8 +249,14 @@ class AppBlockService : AccessibilityService() {
                         }
                         .show()*/
                     blockUrl(url, event?.packageName?.toString() ?: "")
+                    // Record blocked URL attempt in browsing history
+                    Log.d(TAG, "📝 Recording BLOCKED URL to history: $url")
+                    UrlBlockService.recordBrowsingHistory(applicationContext, url, "[BLOCKED] $url")
                 } else {
                     Log.d(TAG, "✅ URL allowed: $url")
+                    // Record allowed URL visit in browsing history
+                    Log.d(TAG, "📝 Recording ALLOWED URL to history: $url")
+                    UrlBlockService.recordBrowsingHistory(applicationContext, url)
                 }
 
                 // Reset after 3 seconds
