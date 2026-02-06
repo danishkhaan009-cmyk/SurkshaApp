@@ -4,7 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
-import '/services/child_mode_service.dart';
+import 'package:without_database/services/child_mode_service.dart';
 
 /// Service to manage app locking when child mode is active
 class AppLockService {

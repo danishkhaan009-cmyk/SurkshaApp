@@ -3,9 +3,9 @@ import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
-import '/services/child_mode_service.dart';
-import '/services/location_tracking_service.dart';
-import '/flutter_flow/flutter_flow_util.dart';
+import 'package:without_database/services/child_mode_service.dart';
+import 'package:without_database/services/location_tracking_service.dart';
+import 'package:without_database/flutter_flow/flutter_flow_util.dart';
 import 'app_lock_screen_model.dart';
 export 'app_lock_screen_model.dart';
 

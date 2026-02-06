@@ -1,5 +1,5 @@
-import '/flutter_flow/flutter_flow_util.dart';
-import '/index.dart';
+import 'package:without_database/flutter_flow/flutter_flow_util.dart';
+import 'package:without_database/index.dart';
 import 'select_mode_widget.dart' show SelectModeWidget;
 import 'package:flutter/material.dart';
 

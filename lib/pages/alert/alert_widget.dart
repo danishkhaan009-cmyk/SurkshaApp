@@ -1,7 +1,7 @@
-import '/flutter_flow/flutter_flow_util.dart';
+import 'package:without_database/flutter_flow/flutter_flow_util.dart';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
-import '/services/database_service.dart';
+import 'package:without_database/services/database_service.dart';
 import 'alert_model.dart';
 export 'alert_model.dart';
 

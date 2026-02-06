@@ -4,12 +4,12 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
-import '../../services/child_mode_service.dart';
-import '../../services/self_mode_service.dart';
-import '/main.dart';
-import '/flutter_flow/flutter_flow_util.dart';
+import 'package:without_database/services/child_mode_service.dart';
+import 'package:without_database/services/self_mode_service.dart';
+import 'package:without_database/main.dart';
+import 'package:without_database/flutter_flow/flutter_flow_util.dart';
 
-import '/index.dart';
+import 'package:without_database/index.dart';
 
 export 'package:go_router/go_router.dart';
 export 'serialization_util.dart';

@@ -1,8 +1,8 @@
-import '/flutter_flow/flutter_flow_theme.dart';
-import '/flutter_flow/flutter_flow_util.dart';
-import '/flutter_flow/flutter_flow_widgets.dart';
-import '/index.dart';
-import '/services/device_setup_service.dart';
+import 'package:without_database/flutter_flow/flutter_flow_theme.dart';
+import 'package:without_database/flutter_flow/flutter_flow_util.dart';
+import 'package:without_database/flutter_flow/flutter_flow_widgets.dart';
+import 'package:without_database/index.dart';
+import 'package:without_database/services/device_setup_service.dart';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'child_device_setup3_model.dart';
@@ -1407,19 +1407,15 @@ class _ChildDeviceSetup3WidgetState extends State<ChildDeviceSetup3Widget> {
                                                   setupData['pairingCode'] ??
                                                       '');
 
-                                      if (existingDevice == null) {
-                                        // Only create if it doesn't exist
-                                        existingDevice =
-                                            await DeviceSetupService
-                                                .createChildDevice(
-                                          childName:
-                                              setupData['childName'] ?? '',
-                                          childAge: setupData['childAge'] ?? '',
-                                          pairingCode:
-                                              setupData['pairingCode'] ?? '',
-                                          permissions: permissions,
-                                        );
-                                      }
+                                      existingDevice ??=
+                                          await DeviceSetupService
+                                              .createChildDevice(
+                                        childName: setupData['childName'] ?? '',
+                                        childAge: setupData['childAge'] ?? '',
+                                        pairingCode:
+                                            setupData['pairingCode'] ?? '',
+                                        permissions: permissions,
+                                      );
 
                                       // Get the device ID to pass to next screen
                                       final deviceId =

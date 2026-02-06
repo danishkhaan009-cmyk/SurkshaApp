@@ -2,13 +2,13 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:shared_preferences/shared_preferences.dart';
-import '/services/child_mode_service.dart';
-import '/services/app_block_bridge.dart';
-import '/services/location_tracking_service.dart';
-import '/services/app_lock_service.dart';
-import '/services/call_logs_service.dart';
-import '/flutter_flow/flutter_flow_util.dart';
-import '/backend/supabase/supabase_rules.dart';
+import 'package:without_database/services/child_mode_service.dart';
+import 'package:without_database/services/app_block_bridge.dart';
+import 'package:without_database/services/location_tracking_service.dart';
+import 'package:without_database/services/app_lock_service.dart';
+import 'package:without_database/services/call_logs_service.dart';
+import 'package:without_database/flutter_flow/flutter_flow_util.dart';
+import 'package:without_database/backend/supabase/supabase_rules.dart';
 
 /// Service to enforce parental control rules dynamically
 class RulesEnforcementService {

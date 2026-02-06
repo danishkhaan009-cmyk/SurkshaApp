@@ -1,4 +1,4 @@
-import '/flutter_flow/flutter_flow_util.dart';
+import 'package:without_database/flutter_flow/flutter_flow_util.dart';
 import 'package:flutter/material.dart';
 
 class AppLockScreenModel extends FlutterFlowModel {

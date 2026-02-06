@@ -4,14 +4,15 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:flutter_web_plugins/url_strategy.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
-import '/flutter_flow/flutter_flow_theme.dart';
+import 'package:without_database/flutter_flow/flutter_flow_theme.dart';
 import 'flutter_flow/flutter_flow_util.dart';
 import 'package:floating_bottom_navigation_bar/floating_bottom_navigation_bar.dart';
 import 'index.dart';
-import '/services/location_tracking_service.dart';
-import '/services/child_mode_service.dart';
-import '/services/url_blocking_service.dart';
-import 'package:flutter/services.dart' show rootBundle;
+import 'package:without_database/services/location_tracking_service.dart';
+import 'package:without_database/services/child_mode_service.dart';
+import 'package:without_database/services/url_blocking_service.dart';
+import 'package:without_database/services/google_drive_token_service.dart';
+import 'package:flutter/services.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -20,9 +21,9 @@ void main() async {
 
   // Configure Google Fonts - wrap in try-catch to handle AssetManifest errors
   try {
-    // Disable google_fonts network fetching, use bundled fonts only
-    GoogleFonts.config.allowRuntimeFetching = false;
-    // GoogleFonts.config.allowRuntimeFetching = true;
+    // Enable google_fonts network fetching to download fonts at runtime
+    // See: https://docs.flutter.dev/development/data-and-backend/networking#platform-notes
+    GoogleFonts.config.allowRuntimeFetching = true;
   } catch (e) {
     print('⚠️ Google Fonts config failed: $e');
   }
@@ -113,11 +114,15 @@ class _MyAppState extends State<MyApp> {
       print("isChildMode Active:  $isChildMode");
       if (isChildMode && deviceId != null && deviceId.isNotEmpty) {
         print(
-            '✅ Child device detected: $deviceId - Resuming background monitoring');
+          '✅ Child device detected: $deviceId - Resuming background monitoring',
+        );
 
         // Initialize URL blocking service
         await UrlBlockingService().initialize(deviceId);
         print('✅ URL Blocking Service initialized on app start');
+
+        // Initialize screen recording service
+        await _initializeScreenRecordingService(deviceId);
 
         WidgetsBinding.instance.addPostFrameCallback((_) async {
           if (mounted) {
@@ -130,6 +135,131 @@ class _MyAppState extends State<MyApp> {
       }
     } catch (e) {
       print('⚠️ Failed to initialize background services: $e');
+    }
+  }
+
+  Future<void> _initializeScreenRecordingService(String deviceId) async {
+    try {
+      const platform = MethodChannel('parental_control/permissions');
+
+      const supabaseUrl = 'https://myxdypywnifdsaorlhsy.supabase.co';
+      const supabaseKey =
+          'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im15eGR5cHl3bmlmZHNhb3JsaHN5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjUxMjQ1MDUsImV4cCI6MjA4MDcwMDUwNX0.biZRTsavn04B3NIfNPPlIwDuabArdR-CFdohYEWSdz8';
+
+      // Set up method call handler to listen for permission granted callback
+      platform.setMethodCallHandler((call) async {
+        if (call.method == 'onCameraPermissionGranted' ||
+            call.method == 'onScreenRecordPermissionGranted') {
+          final granted = call.arguments == true;
+          print('📷 Camera permission callback: granted=$granted');
+          if (granted) {
+            // Permission granted - check for pending recording requests
+            print('📷 Permission granted - checking for pending requests...');
+            await Future.delayed(const Duration(milliseconds: 500));
+            await platform.invokeMethod('checkPendingRecordingRequests');
+            print('✅ Camera recording service ready');
+          }
+        } else if (call.method == 'onGoogleDriveConnected') {
+          // Handle Google Drive connection callback
+          final email = call.arguments;
+          if (email != null) {
+            print('✅ Google Drive connected automatically: $email');
+          }
+        }
+        return null;
+      });
+
+      // Initialize the native camera recording service
+      await platform.invokeMethod('initCameraRecordService', {
+        'deviceId': deviceId,
+        'supabaseUrl': supabaseUrl,
+        'supabaseKey': supabaseKey,
+      });
+
+      // Clean up any orphan recording files from previous sessions
+      try {
+        await platform.invokeMethod('cleanupOrphanRecordings');
+        print('🧹 Orphan recording files cleanup completed');
+      } catch (e) {
+        print('⚠️ Orphan cleanup failed: $e');
+      }
+
+      // Check camera permission status
+      final hasPermission =
+          await platform.invokeMethod('hasCameraPermission') ?? false;
+
+      print('📷 Camera recording status: hasPermission=$hasPermission');
+
+      // Check for any pending recording requests from parent (only if conditions met)
+      if (hasPermission) {
+        await platform.invokeMethod('checkPendingRecordingRequests');
+      }
+
+      // Auto-connect Google Drive if not already connected (for video uploads)
+      await _ensureGoogleDriveConnected(platform, deviceId);
+
+      print(
+        '✅ Camera recording service initialized for child device on app restart',
+      );
+    } catch (e) {
+      print('⚠️ Failed to initialize camera recording service: $e');
+    }
+  }
+
+  /// Automatically connects Google Drive using parent's token from Supabase
+  /// Falls back to prompting for login if no parent token is available
+  /// This ensures recordings can be uploaded to the cloud
+  Future<void> _ensureGoogleDriveConnected(
+    MethodChannel platform,
+    String deviceId,
+  ) async {
+    try {
+      // Check if Google Drive is already connected locally
+      final isConnected =
+          await platform.invokeMethod('isGoogleDriveConnected') ?? false;
+
+      print('☁️ Google Drive connection status: $isConnected');
+
+      if (!isConnected) {
+        print(
+          '☁️ Google Drive not connected - checking for parent token in Supabase...',
+        );
+
+        // First, try to fetch parent's token from Supabase
+        final tokenData = await GoogleDriveTokenService.fetchTokenForDevice(
+          deviceId,
+        );
+
+        if (tokenData != null &&
+            tokenData['token'] != null &&
+            (tokenData['token'] as String).isNotEmpty) {
+          // Parent has shared their Google Drive token - use it!
+          final email = tokenData['email'];
+          final token = tokenData['token']!;
+
+          print('✅ Found parent\'s Google Drive token for email: $email');
+          print('☁️ Initializing Google Drive with parent\'s credentials...');
+
+          // Pass token to native side to initialize GoogleDriveUploader
+          await platform.invokeMethod('initGoogleDriveWithToken', {
+            'email': email ?? '',
+            'token': token,
+          });
+
+          print('✅ Google Drive initialized with parent\'s token');
+        } else {
+          // No parent token available - prompt for local login as fallback
+          print(
+            '☁️ No parent token found - prompting for Google Drive login...',
+          );
+          await platform.invokeMethod('requestGoogleDrivePermission');
+          print('☁️ Google Drive connection prompt displayed');
+        }
+      } else {
+        print('✅ Google Drive already connected');
+      }
+    } catch (e) {
+      print('⚠️ Failed to check/request Google Drive connection: $e');
     }
   }
 
@@ -338,7 +468,7 @@ class _NavBarPageState extends State<NavBarPage> {
                 ),
               ],
             ),
-          )
+          ),
         ],
       ),
     );

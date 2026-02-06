@@ -79,6 +79,8 @@ dependencies:
   google_maps_flutter: ^2.5.3
   location: ^5.0.3
   cupertino_icons: ^1.0.0
+  chewie: ^1.8.1
+  video_player: ^2.8.3
 
 dependency_overrides:
   http: 1.4.0
