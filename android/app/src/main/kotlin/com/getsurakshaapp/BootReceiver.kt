@@ -1,4 +1,4 @@
-package com.mycompany.SurakshaApp
+package com.getsurakshaapp
 
 import android.content.BroadcastReceiver
 import android.content.Context

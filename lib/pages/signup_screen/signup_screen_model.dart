@@ -1,5 +1,5 @@
-import '/flutter_flow/flutter_flow_util.dart';
-import '/index.dart';
+import 'package:without_database/flutter_flow/flutter_flow_util.dart';
+import 'package:without_database/index.dart';
 import 'signup_screen_widget.dart' show SignupScreenWidget;
 import 'package:flutter/material.dart';
 

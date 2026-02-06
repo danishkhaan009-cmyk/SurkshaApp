@@ -1,6 +1,6 @@
-import '/flutter_flow/flutter_flow_util.dart';
-import '/index.dart';
-import '/services/database_service.dart';
+import 'package:without_database/flutter_flow/flutter_flow_util.dart';
+import 'package:without_database/index.dart';
+import 'package:without_database/services/database_service.dart';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'parent_dashboard_model.dart';

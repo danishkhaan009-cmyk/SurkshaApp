@@ -1,4 +1,4 @@
-package com.mycompany.SurakshaApp
+package com.getsurakshaapp
 
 import android.content.BroadcastReceiver
 import android.content.Context
@@ -13,7 +13,7 @@ class RestartReceiver : BroadcastReceiver() {
     
     companion object {
         private const val TAG = "RestartReceiver"
-        const val ACTION_RESTART_SERVICE = "com.mycompany.SurakshaApp.RESTART_LOCATION_SERVICE"
+        const val ACTION_RESTART_SERVICE = "com.getsurakshaapp.RESTART_LOCATION_SERVICE"
     }
     
     override fun onReceive(context: Context, intent: Intent) {

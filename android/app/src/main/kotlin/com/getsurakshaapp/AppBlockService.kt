@@ -1,4 +1,4 @@
-package com.mycompany.SurakshaApp
+package com.getsurakshaapp
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.AccessibilityServiceInfo
@@ -25,7 +25,7 @@ class AppBlockService : AccessibilityService() {
         private const val TAG = "AppBlockService"
         private const val NOTIFICATION_CHANNEL_ID = "app_block_channel"
         private const val NOTIFICATION_ID = 1001
-        private const val OUR_PACKAGE_NAME = "com.mycompany.SurakshaApp"
+        private const val OUR_PACKAGE_NAME = "com.getsurakshaapp"
         private const val PREFS = "applock_prefs"
         
         private val lockedApps = mutableSetOf<String>()

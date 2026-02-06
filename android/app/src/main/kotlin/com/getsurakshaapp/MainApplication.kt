@@ -1,4 +1,4 @@
-package com.mycompany.SurakshaApp
+package com.getsurakshaapp
 
 import android.app.Application
 import android.util.Log
@@ -13,7 +13,7 @@ class MainApplication : Application() {
     
     override fun onCreate() {
         super.onCreate()
-        com.mycompany.SurakshaApp.AppContextHolder.app = this
+        com.getsurakshaapp.AppContextHolder.app = this
         
         // Initialize WorkManager with custom configuration
         initializeWorkManager()

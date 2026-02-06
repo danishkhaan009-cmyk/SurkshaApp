@@ -1,17 +1,17 @@
-import '/flutter_flow/flutter_flow_button_tabbar.dart';
-import '/flutter_flow/flutter_flow_static_map.dart';
-import '/flutter_flow/flutter_flow_theme.dart';
-import '/flutter_flow/flutter_flow_util.dart';
-import '/flutter_flow/flutter_flow_widgets.dart';
+import 'package:without_database/flutter_flow/flutter_flow_button_tabbar.dart';
+import 'package:without_database/flutter_flow/flutter_flow_static_map.dart';
+import 'package:without_database/flutter_flow/flutter_flow_theme.dart';
+import 'package:without_database/flutter_flow/flutter_flow_util.dart';
+import 'package:without_database/flutter_flow/flutter_flow_widgets.dart';
 import 'package:mapbox_search/mapbox_search.dart' as mapbox;
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import '/services/location_tracking_service.dart';
-import '/services/child_mode_service.dart';
-import '/services/installed_apps_service.dart';
-import '/services/call_logs_service.dart';
-import '/index.dart';
+import 'package:without_database/services/location_tracking_service.dart';
+import 'package:without_database/services/child_mode_service.dart';
+import 'package:without_database/services/installed_apps_service.dart';
+import 'package:without_database/services/call_logs_service.dart';
+import 'package:without_database/index.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'self_mode_model.dart';
 export 'self_mode_model.dart';
@@ -375,7 +375,7 @@ class _SelfModeWidgetState extends State<SelfModeWidget>
                                 },
                                 () async {}, // Location Plus tab
                                 () async {}, // Photos Pro tab
-                                () async {}, // Keylogging tab
+                                () async {}, // Recording tab
                                 () async {
                                   // Call Pro tab - load call logs if not loaded
                                   print('📞 Call Pro tab clicked');

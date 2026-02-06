@@ -1,7 +1,7 @@
-import '/flutter_flow/flutter_flow_util.dart';
-import '/services/database_service.dart';
-import '/services/device_setup_service.dart';
-import '/services/auth_service.dart';
+import 'package:without_database/flutter_flow/flutter_flow_util.dart';
+import 'package:without_database/services/database_service.dart';
+import 'package:without_database/services/device_setup_service.dart';
+import 'package:without_database/services/auth_service.dart';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';

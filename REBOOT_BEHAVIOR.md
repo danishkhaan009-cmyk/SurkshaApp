@@ -197,7 +197,7 @@ Require PIN/password for device unlock
 ```bash
 # Before reboot
 adb shell pm list packages | grep SurakshaApp
-com.mycompany.SurakshaApp
+com.getsurakshaapp
 
 # Reboot device
 adb reboot

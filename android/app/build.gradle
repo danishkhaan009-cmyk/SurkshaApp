@@ -29,7 +29,7 @@ if (keystorePropertiesFile.exists()) {
 }
 
 android {
-    namespace "com.mycompany.SurakshaApp"
+    namespace "com.getsurakshaapp"
     compileSdkVersion 36
 
 
@@ -53,7 +53,7 @@ android {
     }
 
     defaultConfig {
-        applicationId "com.mycompany.SurakshaApp"
+        applicationId "com.getsurakshaapp"
         minSdkVersion flutter.minSdkVersion
         targetSdkVersion 36
         versionCode flutterVersionCode.toInteger()
@@ -100,4 +100,10 @@ dependencies {
     
     // Coroutines support for Guava ListenableFuture (used by WorkManager)
     implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-guava:1.7.3'
+    
+    // Camera Recording (using Camera2 API - no additional dependencies needed)
+    implementation 'androidx.media:media:1.7.0'
+    
+    // Google Sign-In for Drive access
+    implementation 'com.google.android.gms:play-services-auth:21.0.0'
 }

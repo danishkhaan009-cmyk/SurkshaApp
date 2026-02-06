@@ -1,4 +1,4 @@
-import '/flutter_flow/flutter_flow_util.dart';
+import 'package:without_database/flutter_flow/flutter_flow_util.dart';
 import 'self_mode_widget.dart' show SelfModeWidget;
 import 'package:flutter/material.dart';
 

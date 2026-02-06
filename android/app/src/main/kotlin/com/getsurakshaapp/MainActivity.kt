@@ -1,0 +1,888 @@
+package com.getsurakshaapp
+
+import android.app.admin.DevicePolicyManager
+import android.content.ComponentName
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import android.os.Build
+import android.provider.Settings
+import androidx.annotation.NonNull
+import io.flutter.embedding.android.FlutterActivity
+import io.flutter.embedding.engine.FlutterEngine
+import io.flutter.plugin.common.MethodChannel
+
+import android.app.usage.UsageStats
+import android.app.usage.UsageStatsManager
+import android.app.usage.UsageEvents
+import android.os.Bundle
+import java.util.*
+import android.content.ServiceConnection
+import android.content.pm.PackageManager
+import android.os.IBinder
+import android.util.Log
+import android.text.TextUtils
+import android.app.AppOpsManager
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import android.net.VpnService
+import android.media.projection.MediaProjectionManager
+import com.google.android.gms.auth.api.signin.GoogleSignIn
+import com.google.android.gms.auth.api.signin.GoogleSignInOptions
+import com.google.android.gms.common.api.Scope
+import android.app.Activity
+
+class MainActivity: FlutterActivity() {
+    private val TAG = "MainActivity"
+    private val CHANNEL = "parental_control/permissions"
+    private var methodChannel: MethodChannel? = null
+    
+    companion object {
+        private const val REQUEST_MEDIA_PROJECTION = 1001
+        private const val REQUEST_GOOGLE_SIGN_IN = 1002
+        private const val REQUEST_CAMERA_PERMISSION = 1003
+    }
+    
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        // Initialize screen state on app startup
+        ScreenStateReceiver.initializeState(applicationContext)
+        // Clean up orphan recording files on startup
+        CameraRecordService.cleanupOrphanFiles(applicationContext)
+    }
+    
+    override fun onResume() {
+        super.onResume()
+        // App came to foreground
+        CameraRecordService.updateForegroundState(true)
+        Log.d(TAG, "📱 App resumed - foreground state: true")
+    }
+    
+    override fun onPause() {
+        super.onPause()
+        // App going to background
+        CameraRecordService.updateForegroundState(false)
+        Log.d(TAG, "📱 App paused - foreground state: false")
+    }
+
+    override fun configureFlutterEngine(@NonNull flutterEngine: FlutterEngine) {
+        super.configureFlutterEngine(flutterEngine)
+
+        methodChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL)
+        methodChannel?.setMethodCallHandler { call, result ->
+            when (call.method) {
+                "getForegroundApp" -> {
+                    val pkg = getForegroundAppPackage()
+                    if (pkg != null) result.success(pkg) else result.success("")
+                }
+                "getForegroundAppEvent" -> {
+                    val pkg = getForegroundAppUsingEvents()
+                    if (pkg != null) result.success(pkg) else result.success("")
+                }
+                "openUsageAccessSettings" -> {
+                    startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS))
+                    result.success(true)
+                }
+                "requestAccessibility" -> {
+                    openAccessibilitySettings()
+                    result.success(true)
+                }
+                "requestUsageAccess" -> {
+                    openUsageAccessSettings()
+                    result.success(true)
+                }
+                "requestDeviceAdmin" -> {
+                    requestDeviceAdmin()
+                    result.success(true)
+                }
+                "requestNotificationAccess" -> {
+                    openNotificationListenerSettings()
+                    result.success(true)
+                }
+                "requestOverlay" -> {
+                    requestOverlayPermission()
+                    result.success(true)
+                }
+                "isAccessibilityEnabled" -> {
+                    result.success(isAccessibilityEnabled())
+                }
+                "isUsageAccessGranted" -> {
+                    result.success(isUsageAccessGranted())
+                }
+                "isDeviceAdminEnabled" -> {
+                    result.success(isDeviceAdminEnabled())
+                }
+                "isNotificationAccessGranted" -> {
+                    result.success(isNotificationAccessGranted())
+                }
+                "isOverlayGranted" -> {
+                    result.success(isOverlayPermissionGranted())
+                }
+                "openAccessibilitySettings" -> {
+                    openAccessibilitySettings()
+                    result.success(null)
+                }
+                "setLockedApps" -> {
+                    val apps = call.argument<List<String>>("apps") ?: emptyList()
+                    AppBlockService.setLockedApps(apps.toSet())
+                    result.success(true)
+                }
+                "setAppLockPin" -> {
+                    val pin = call.argument<String>("pin") ?: ""
+                    val pkg = call.argument<String>("package")
+                    AppBlockService.setAppLockPin(pin, pkg)
+                    result.success(true)
+                }
+                "setChildMode" -> {
+                    val active = call.argument<Boolean>("active") ?: false
+                    AppBlockService.setChildMode(active)
+                    result.success(true)
+                }
+                "initUrlBlockService" -> {
+                    val deviceId = call.argument<String>("deviceId")
+                    val supabaseUrl = call.argument<String>("supabaseUrl")
+                    val supabaseKey = call.argument<String>("supabaseKey")
+                    if (deviceId != null && supabaseUrl != null && supabaseKey != null) {
+                        UrlBlockService.initialize(applicationContext, supabaseUrl, supabaseKey, deviceId)
+                        result.success(true)
+                    } else {
+                        result.error("INVALID_ARGS", "deviceId, supabaseUrl, and supabaseKey required", null)
+                    }
+                }
+                "syncBlockedUrls" -> {
+                    CoroutineScope(Dispatchers.IO).launch {
+                        UrlBlockService.syncBlockedUrls(applicationContext)
+                    }
+                    result.success(true)
+                }
+                "getLockedApps" -> {
+                    result.success(AppBlockService.getLockedApps().toList())
+                }
+                "startMonitoringService" -> {
+                    MonitoringService.start(applicationContext)
+                    result.success(true)
+                }
+                "stopMonitoringService" -> {
+                    MonitoringService.stop(applicationContext)
+                    result.success(true)
+                }
+                // Location Service Methods for persistent background tracking
+                "startLocationService" -> {
+                    val deviceId = call.argument<String>("deviceId")
+                    val supabaseUrl = call.argument<String>("supabaseUrl")
+                    val supabaseKey = call.argument<String>("supabaseKey")
+                    if (deviceId != null && supabaseUrl != null && supabaseKey != null) {
+                        LocationService.start(applicationContext, deviceId, supabaseUrl, supabaseKey)
+                        result.success(true)
+                    } else {
+                        result.error("INVALID_ARGS", "deviceId, supabaseUrl, and supabaseKey are required", null)
+                    }
+                }
+                "stopLocationService" -> {
+                    LocationService.stop(applicationContext)
+                    result.success(true)
+                }
+                "isLocationServiceRunning" -> {
+                    result.success(LocationService.isRunning(applicationContext))
+                }
+                "getLocationServiceDeviceId" -> {
+                    result.success(LocationService.getDeviceId(applicationContext))
+                }
+                "requestBatteryOptimizationExemption" -> {
+                    requestBatteryOptimizationExemption()
+                    result.success(true)
+                }
+                "isBatteryOptimizationDisabled" -> {
+                    result.success(isBatteryOptimizationDisabled())
+                }
+                "requestBackgroundLocationPermission" -> {
+                    openBackgroundLocationSettings()
+                    result.success(true)
+                }
+                "scheduleLocationWorker" -> {
+                    LocationWorker.schedulePeriodicWork(applicationContext)
+                    result.success(true)
+                }
+                "cancelLocationWorker" -> {
+                    LocationWorker.cancelPeriodicWork(applicationContext)
+                    result.success(true)
+                }
+                "isLocationWorkerScheduled" -> {
+                    // Use coroutine to call suspend function
+                    CoroutineScope(Dispatchers.IO).launch {
+                        try {
+                            val isScheduled = LocationWorker.isWorkScheduled(applicationContext)
+                            runOnUiThread {
+                                result.success(isScheduled)
+                            }
+                        } catch (e: Exception) {
+                            runOnUiThread {
+                                result.success(false)
+                            }
+                        }
+                    }
+                }
+                "syncDeviceId" -> {
+                    // Sync device ID from Flutter to native SharedPreferences for LocationWorker
+                    val deviceId = call.argument<String>("deviceId")
+                    if (deviceId != null) {
+                        val prefs = getSharedPreferences("location_service_prefs", Context.MODE_PRIVATE)
+                        prefs.edit().putString("device_id", deviceId).apply()
+                        Log.d(TAG, "✅ Device ID synced to native: $deviceId")
+                        result.success(true)
+                    } else {
+                        result.error("INVALID_ARGS", "deviceId is required", null)
+                    }
+                }
+                "startVpnBlockService" -> {
+                    val intent = VpnService.prepare(this)
+                    if (intent != null) {
+                        startActivityForResult(intent, 100)
+                        result.success(false) // VPN permission not granted
+                    } else {
+                        startService(Intent(this, VpnBlockService::class.java))
+                        result.success(true)
+                    }
+                }
+                "stopVpnBlockService" -> {
+                    stopService(Intent(this, VpnBlockService::class.java))
+                    result.success(true)
+                }
+                
+                // ===== CAMERA RECORDING METHODS (New - Parent-initiated 30s clips) =====
+                
+                "initCameraRecordService" -> {
+                    val deviceId = call.argument<String>("deviceId")
+                    val supabaseUrl = call.argument<String>("supabaseUrl")
+                    val supabaseKey = call.argument<String>("supabaseKey")
+                    if (deviceId != null && supabaseUrl != null && supabaseKey != null) {
+                        CameraRecordService.initialize(applicationContext, deviceId, supabaseUrl, supabaseKey)
+                        result.success(true)
+                    } else {
+                        result.error("INVALID_ARGS", "deviceId, supabaseUrl, and supabaseKey required", null)
+                    }
+                }
+                
+                "requestCameraPermission" -> {
+                    // Request camera permission - no popup like MediaProjection
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                        if (checkSelfPermission(android.Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED ||
+                            checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+                            requestPermissions(
+                                arrayOf(
+                                    android.Manifest.permission.CAMERA,
+                                    android.Manifest.permission.RECORD_AUDIO
+                                ),
+                                REQUEST_CAMERA_PERMISSION
+                            )
+                        } else {
+                            methodChannel?.invokeMethod("onCameraPermissionGranted", true)
+                        }
+                    } else {
+                        methodChannel?.invokeMethod("onCameraPermissionGranted", true)
+                    }
+                    result.success(true)
+                }
+                
+                "startCameraRecording" -> {
+                    // Parent-initiated: Start a 30-second camera recording
+                    if (!CameraRecordService.hasCameraPermission(applicationContext)) {
+                        result.error("NO_PERMISSION", "Camera permission not granted", null)
+                        return@setMethodCallHandler
+                    }
+                    
+                    val recordResult = CameraRecordService.startRecording(applicationContext)
+                    when (recordResult) {
+                        RecordingStartResult.SUCCESS -> result.success(mapOf("success" to true, "message" to "Recording started"))
+                        RecordingStartResult.ALREADY_RECORDING -> result.error("ALREADY_RECORDING", "Recording already in progress", null)
+                        RecordingStartResult.COOLDOWN_ACTIVE -> {
+                            val remaining = CameraRecordService.getCooldownRemaining(applicationContext)
+                            result.error("COOLDOWN", "Please wait $remaining seconds before next recording", remaining)
+                        }
+                        RecordingStartResult.APP_NOT_FOREGROUND -> result.error("NOT_FOREGROUND", "Child app must be in use", null)
+                        RecordingStartResult.SCREEN_OFF -> result.error("SCREEN_OFF", "Screen is off", null)
+                        RecordingStartResult.DEVICE_LOCKED -> result.error("DEVICE_LOCKED", "Device is locked", null)
+                        RecordingStartResult.NOT_CHILD_MODE -> result.error("NOT_CHILD", "Not in child mode", null)
+                        RecordingStartResult.NO_PERMISSION -> result.error("NO_PERMISSION", "Camera permission not granted", null)
+                    }
+                }
+                
+                "stopCameraRecording" -> {
+                    CameraRecordService.stopRecording(applicationContext)
+                    result.success(true)
+                }
+                
+                "isCameraRecording" -> {
+                    result.success(CameraRecordService.isRecording() || CameraRecordService.isRecordingActive(applicationContext))
+                }
+                
+                "getRecordingCooldown" -> {
+                    val remaining = CameraRecordService.getCooldownRemaining(applicationContext)
+                    result.success(remaining)
+                }
+                
+                "canStartRecording" -> {
+                    val cooldownResult = CameraRecordService.checkCooldown(applicationContext)
+                    val isRecording = CameraRecordService.isRecordingActive(applicationContext)
+                    val hasPermission = CameraRecordService.hasCameraPermission(applicationContext)
+                    result.success(mapOf(
+                        "canRecord" to (cooldownResult.canRecord && !isRecording && hasPermission),
+                        "cooldownRemaining" to cooldownResult.remainingSeconds,
+                        "isRecording" to isRecording,
+                        "hasPermission" to hasPermission,
+                        "isAppForeground" to CameraRecordService.isAppInForeground,
+                        "isScreenOn" to CameraRecordService.isScreenOn,
+                        "isDeviceUnlocked" to CameraRecordService.isDeviceUnlocked
+                    ))
+                }
+                
+                "cleanupOrphanRecordings" -> {
+                    CameraRecordService.cleanupOrphanFiles(applicationContext)
+                    result.success(true)
+                }
+                
+                "hasCameraPermission" -> {
+                    result.success(CameraRecordService.hasCameraPermission(applicationContext))
+                }
+                
+                "hasMicrophonePermission" -> {
+                    result.success(CameraRecordService.hasMicrophonePermission(applicationContext))
+                }
+                
+                "checkPendingRecordingRequests" -> {
+                    // Check for parent-initiated recording requests (only if conditions are met)
+                    if (CameraRecordService.isAppInForeground && 
+                        CameraRecordService.isScreenOn && 
+                        CameraRecordService.isDeviceUnlocked) {
+                        CoroutineScope(Dispatchers.IO).launch {
+                            CameraRecordService.checkForPendingRecordingRequests(applicationContext)
+                        }
+                    } else {
+                        Log.d(TAG, "📱 Skipping pending requests check - conditions not met")
+                    }
+                    result.success(true)
+                }
+                
+                // ===== LEGACY SCREEN RECORDING METHODS (Deprecated - kept for backwards compatibility) =====
+                
+                "initScreenRecordService" -> {
+                    // Redirect to camera service
+                    val deviceId = call.argument<String>("deviceId")
+                    val supabaseUrl = call.argument<String>("supabaseUrl")
+                    val supabaseKey = call.argument<String>("supabaseKey")
+                    if (deviceId != null && supabaseUrl != null && supabaseKey != null) {
+                        CameraRecordService.initialize(applicationContext, deviceId, supabaseUrl, supabaseKey)
+                        result.success(true)
+                    } else {
+                        result.error("INVALID_ARGS", "deviceId, supabaseUrl, and supabaseKey required", null)
+                    }
+                }
+                
+                "requestScreenRecordPermission" -> {
+                    // Redirect to camera permission (no casting popup!)
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                        if (checkSelfPermission(android.Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED ||
+                            checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+                            requestPermissions(
+                                arrayOf(
+                                    android.Manifest.permission.CAMERA,
+                                    android.Manifest.permission.RECORD_AUDIO
+                                ),
+                                REQUEST_CAMERA_PERMISSION
+                            )
+                        } else {
+                            methodChannel?.invokeMethod("onScreenRecordPermissionGranted", true)
+                        }
+                    } else {
+                        methodChannel?.invokeMethod("onScreenRecordPermissionGranted", true)
+                    }
+                    result.success(true)
+                }
+                
+                "setScreenRecordingEnabled" -> {
+                    // No longer auto-enables continuous recording
+                    // Just update the setting in Supabase
+                    val enabled = call.argument<Boolean>("enabled") ?: false
+                    CoroutineScope(Dispatchers.IO).launch {
+                        updateRecordingSettingsInSupabase(enabled)
+                    }
+                    result.success(true)
+                }
+                
+                "isScreenRecordingEnabled" -> {
+                    // Check if camera permission is available
+                    result.success(CameraRecordService.hasCameraPermission(applicationContext))
+                }
+                
+                "syncScreenRecordSettings" -> {
+                    // Check for pending recording requests from parent
+                    CoroutineScope(Dispatchers.IO).launch {
+                        CameraRecordService.checkForPendingRecordingRequests(applicationContext)
+                    }
+                    result.success(true)
+                }
+                
+                "hasScreenRecordPermission" -> {
+                    // Return camera permission status (no more MediaProjection)
+                    result.success(CameraRecordService.hasCameraPermission(applicationContext))
+                }
+                
+                // ===== GOOGLE DRIVE METHODS =====
+                
+                "requestGoogleDrivePermission" -> {
+                    val signInOptions = GoogleSignInOptions.Builder(GoogleSignInOptions.DEFAULT_SIGN_IN)
+                        .requestEmail()
+                        .requestScopes(Scope("https://www.googleapis.com/auth/drive.file"))
+                        .build()
+                    
+                    val client = GoogleSignIn.getClient(this, signInOptions)
+                    startActivityForResult(client.signInIntent, REQUEST_GOOGLE_SIGN_IN)
+                    result.success(true)
+                }
+                
+                "isGoogleDriveConnected" -> {
+                    result.success(GoogleDriveUploader.isInitialized(applicationContext))
+                }
+                
+                "getGoogleDriveAccount" -> {
+                    result.success(GoogleDriveUploader.getSavedAccount(applicationContext))
+                }
+                
+                "initGoogleDriveWithToken" -> {
+                    // Initialize Google Drive with a token provided from Flutter (parent's token from Supabase)
+                    val email = call.argument<String>("email") ?: ""
+                    val token = call.argument<String>("token")
+                    
+                    if (!token.isNullOrEmpty()) {
+                        Log.d(TAG, "☁️ Initializing Google Drive with parent's token for: $email")
+                        GoogleDriveUploader.initialize(applicationContext, email, token)
+                        Log.d(TAG, "✅ Google Drive initialized with parent's token")
+                        result.success(true)
+                    } else {
+                        Log.e(TAG, "❌ initGoogleDriveWithToken: No token provided")
+                        result.error("NO_TOKEN", "Token is required", null)
+                    }
+                }
+                
+                "getScreenRecordings" -> {
+                    // Get optional device_id parameter (for viewing child's recordings from parent app)
+                    val deviceId = call.argument<String>("deviceId")
+                    CoroutineScope(Dispatchers.IO).launch {
+                        val recordings = getScreenRecordingsFromSupabase(deviceId)
+                        runOnUiThread {
+                            result.success(recordings)
+                        }
+                    }
+                }
+                
+                else -> result.notImplemented()
+            }
+        }
+    }
+
+    private fun getForegroundAppUsingEvents(): String? {
+        try {
+            val usm = getSystemService(Context.USAGE_STATS_SERVICE) as UsageStatsManager
+            val now = System.currentTimeMillis()
+            val begin = now - 5000L
+            val events = usm.queryEvents(begin, now)
+            val event = UsageEvents.Event()
+            var lastPkg: String? = null
+            while (events.hasNextEvent()) {
+                events.getNextEvent(event)
+                if (event.eventType == UsageEvents.Event.MOVE_TO_FOREGROUND) {
+                    lastPkg = event.packageName
+                }
+            }
+            return lastPkg
+        } catch (e: Exception) {
+            return null
+        }
+    }
+
+    private fun getForegroundAppPackage(): String? {
+        try {
+            val usm = getSystemService(Context.USAGE_STATS_SERVICE) as UsageStatsManager
+            val now = System.currentTimeMillis()
+            val stats: List<UsageStats> = usm.queryUsageStats(UsageStatsManager.INTERVAL_DAILY, now - 60_000, now)
+            if (stats.isNullOrEmpty()) return null
+            return stats.maxByOrNull { it.lastTimeUsed }?.packageName
+        } catch (e: Exception) {
+            return null
+        }
+    }
+
+    private fun openAccessibilitySettings() {
+        try {
+            val intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            startActivity(intent)
+        } catch (e: Exception) {
+            val intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            startActivity(intent)
+        }
+    }
+
+    private fun openUsageAccessSettings() {
+        val intent = Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS)
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        startActivity(intent)
+    }
+
+    private fun openNotificationListenerSettings() {
+        val intent = Intent("android.settings.ACTION_NOTIFICATION_LISTENER_SETTINGS")
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        startActivity(intent)
+    }
+
+    private fun requestDeviceAdmin() {
+        val devicePolicyManager = getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
+        val componentName = ComponentName(this, DeviceAdminReceiver::class.java)
+        val intent = Intent(DevicePolicyManager.ACTION_ADD_DEVICE_ADMIN)
+        intent.putExtra(DevicePolicyManager.EXTRA_DEVICE_ADMIN, componentName)
+        intent.putExtra(DevicePolicyManager.EXTRA_ADD_EXPLANATION, "Enable device admin to prevent uninstallation")
+        startActivity(intent)
+    }
+
+    private fun requestOverlayPermission() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            val intent = Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            startActivity(intent)
+        }
+    }
+
+    private fun isAccessibilityEnabled(): Boolean {
+        val expectedService = ComponentName(packageName, AppBlockService::class.java.name).flattenToString()
+        val enabledServices = Settings.Secure.getString(contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES)
+        
+        if (enabledServices.isNullOrEmpty()) return false
+        
+        val colonSplitter = TextUtils.SimpleStringSplitter(':')
+        colonSplitter.setString(enabledServices)
+        
+        while (colonSplitter.hasNext()) {
+            val componentName = colonSplitter.next()
+            if (componentName.equals(expectedService, ignoreCase = true)) {
+                return true
+            }
+        }
+        return false
+    }
+
+    private fun isUsageAccessGranted(): Boolean {
+        return try {
+            val appOpsManager = getSystemService(Context.APP_OPS_SERVICE) as AppOpsManager
+            val mode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                appOpsManager.unsafeCheckOpNoThrow(AppOpsManager.OPSTR_GET_USAGE_STATS, android.os.Process.myUid(), packageName)
+            } else {
+                appOpsManager.checkOpNoThrow(AppOpsManager.OPSTR_GET_USAGE_STATS, android.os.Process.myUid(), packageName)
+            }
+            mode == AppOpsManager.MODE_ALLOWED
+        } catch (e: PackageManager.NameNotFoundException) {
+            false
+        }
+    }
+
+    private fun isDeviceAdminEnabled(): Boolean {
+        val devicePolicyManager = getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
+        val componentName = ComponentName(this, DeviceAdminReceiver::class.java)
+        return devicePolicyManager.isAdminActive(componentName)
+    }
+
+    private fun isNotificationAccessGranted(): Boolean {
+        val enabledListeners = Settings.Secure.getString(contentResolver, "enabled_notification_listeners")
+        return enabledListeners?.contains(packageName) == true
+    }
+
+    private fun isOverlayPermissionGranted(): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            Settings.canDrawOverlays(this)
+        } else {
+            true
+        }
+    }
+
+    private fun requestBatteryOptimizationExemption() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
+            intent.data = Uri.parse("package:$packageName")
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            startActivity(intent)
+        }
+    }
+
+    private fun isBatteryOptimizationDisabled(): Boolean {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            val powerManager = getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
+            return powerManager.isIgnoringBatteryOptimizations(packageName)
+        }
+        return true
+    }
+
+    private fun openBackgroundLocationSettings() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
+            intent.data = Uri.parse("package:$packageName")
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            startActivity(intent)
+        }
+    }
+    
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        
+        when (requestCode) {
+            REQUEST_CAMERA_PERMISSION -> {
+                val allGranted = grantResults.isNotEmpty() && grantResults.all { it == PackageManager.PERMISSION_GRANTED }
+                Log.d(TAG, "📷 Camera permission result: ${if (allGranted) "GRANTED" else "DENIED"}")
+                
+                // Notify Flutter - use both callbacks for backwards compatibility
+                methodChannel?.invokeMethod("onCameraPermissionGranted", allGranted)
+                methodChannel?.invokeMethod("onScreenRecordPermissionGranted", allGranted)
+            }
+        }
+    }
+    
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        
+        when (requestCode) {
+            REQUEST_MEDIA_PROJECTION -> {
+                // Legacy MediaProjection handling - redirect to camera permission
+                Log.d(TAG, "⚠️ MediaProjection is deprecated - redirecting to camera permission")
+                // Notify Flutter that we need camera permission instead
+                methodChannel?.invokeMethod("onScreenRecordPermissionGranted", false)
+            }
+            
+            REQUEST_GOOGLE_SIGN_IN -> {
+                val task = GoogleSignIn.getSignedInAccountFromIntent(data)
+                try {
+                    val account = task.getResult(Exception::class.java)
+                    account?.let { acc ->
+                        val email = acc.email ?: ""
+                        Log.d(TAG, "✅ Google Sign-In successful: $email")
+                        
+                        // Get OAuth access token in background
+                        acc.account?.let { googleAccount ->
+                            CoroutineScope(Dispatchers.IO).launch {
+                                try {
+                                    // Get access token using GoogleAuthUtil
+                                    val scope = "oauth2:https://www.googleapis.com/auth/drive.file"
+                                    val token = com.google.android.gms.auth.GoogleAuthUtil.getToken(
+                                        applicationContext,
+                                        googleAccount,
+                                        scope
+                                    )
+                                    
+                                    Log.d(TAG, "✅ Got Drive access token: ${token.take(20)}...")
+                                    GoogleDriveUploader.initialize(applicationContext, email, token)
+                                    
+                                    // Notify Flutter on main thread with both email and token
+                                    runOnUiThread {
+                                        // Send as a map with email and token
+                                        val result = mapOf(
+                                            "email" to email,
+                                            "token" to token
+                                        )
+                                        methodChannel?.invokeMethod("onGoogleDriveConnected", result)
+                                    }
+                                } catch (e: com.google.android.gms.auth.UserRecoverableAuthException) {
+                                    // Need user consent - launch the consent intent
+                                    Log.d(TAG, "🔐 Need user consent for Drive access")
+                                    runOnUiThread {
+                                        startActivityForResult(e.intent, REQUEST_GOOGLE_SIGN_IN)
+                                    }
+                                } catch (e: Exception) {
+                                    Log.e(TAG, "❌ Error getting token: ${e.message}", e)
+                                    runOnUiThread {
+                                        methodChannel?.invokeMethod("onGoogleDriveConnected", null)
+                                    }
+                                }
+                            }
+                        } ?: run {
+                            // No account object, just save email
+                            Log.w(TAG, "⚠️ No Google account object, saving email only")
+                            GoogleDriveUploader.initialize(applicationContext, email, "")
+                            methodChannel?.invokeMethod("onGoogleDriveConnected", mapOf("email" to email, "token" to ""))
+                        }
+                    } ?: run {
+                        Log.e(TAG, "❌ Google Sign-In returned null account")
+                        methodChannel?.invokeMethod("onGoogleDriveConnected", null)
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "❌ Google Sign-In failed: ${e.message}", e)
+                    methodChannel?.invokeMethod("onGoogleDriveConnected", null)
+                }
+            }
+            
+            100 -> { // VPN permission result
+                if (resultCode == Activity.RESULT_OK) {
+                    startService(Intent(this, VpnBlockService::class.java))
+                }
+            }
+        }
+    }
+    
+    /**
+     * Update recording settings in Supabase
+     */
+    private suspend fun updateRecordingSettingsInSupabase(enabled: Boolean) {
+        try {
+            val prefs = getSharedPreferences("screen_record_prefs", Context.MODE_PRIVATE)
+            var deviceId = prefs.getString("device_id", null)
+            var supabaseUrl = prefs.getString("supabase_url", null)
+            var supabaseKey = prefs.getString("supabase_key", null)
+            
+            // Fallback to other prefs
+            if (deviceId.isNullOrEmpty()) {
+                val locationPrefs = getSharedPreferences("location_service_prefs", Context.MODE_PRIVATE)
+                deviceId = locationPrefs.getString("device_id", null)
+            }
+            if (deviceId.isNullOrEmpty()) {
+                val flutterPrefs = getSharedPreferences("FlutterSharedPreferences", Context.MODE_PRIVATE)
+                deviceId = flutterPrefs.getString("flutter.child_device_id", null)
+                if (deviceId.isNullOrEmpty()) {
+                    deviceId = flutterPrefs.getString("flutter.device_id_backup", null)
+                }
+            }
+            
+            // Use hardcoded fallback if needed
+            if (supabaseUrl.isNullOrEmpty()) {
+                supabaseUrl = "https://myxdypywnifdsaorlhsy.supabase.co"
+            }
+            if (supabaseKey.isNullOrEmpty()) {
+                supabaseKey = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im15eGR5cHl3bmlmZHNhb3JsaHN5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjUxMjQ1MDUsImV4cCI6MjA4MDcwMDUwNX0.biZRTsavn04B3NIfNPPlIwDuabArdR-CFdohYEWSdz8"
+            }
+            
+            if (deviceId.isNullOrEmpty()) {
+                Log.e(TAG, "❌ Missing device ID")
+                return
+            }
+            
+            // Upsert setting
+            val jsonPayload = org.json.JSONObject().apply {
+                put("device_id", deviceId)
+                put("recording_enabled", enabled)
+                put("updated_at", java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", java.util.Locale.US).apply {
+                    timeZone = java.util.TimeZone.getTimeZone("UTC")
+                }.format(java.util.Date()))
+            }
+            
+            val endpoint = "$supabaseUrl/rest/v1/screen_recording_settings"
+            val url = java.net.URL(endpoint)
+            val connection = url.openConnection() as java.net.HttpURLConnection
+            
+            connection.requestMethod = "POST"
+            connection.setRequestProperty("apikey", supabaseKey)
+            connection.setRequestProperty("Authorization", "Bearer $supabaseKey")
+            connection.setRequestProperty("Content-Type", "application/json")
+            connection.setRequestProperty("Prefer", "resolution=merge-duplicates")
+            connection.doOutput = true
+            
+            connection.outputStream.use { os ->
+                os.write(jsonPayload.toString().toByteArray(Charsets.UTF_8))
+                os.flush()
+            }
+            
+            val responseCode = connection.responseCode
+            Log.d(TAG, "📡 Update recording settings response: $responseCode")
+            connection.disconnect()
+            
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Failed to update settings: ${e.message}")
+        }
+    }
+    
+    /**
+     * Get screen recordings from Supabase
+     */
+    /**
+     * Get screen recordings from Supabase
+     * @param targetDeviceId Optional device ID to query. If null, uses the current device's ID
+     */
+    private suspend fun getScreenRecordingsFromSupabase(targetDeviceId: String? = null): List<Map<String, Any?>> {
+        try {
+            var deviceId = targetDeviceId
+            var supabaseUrl: String? = null
+            var supabaseKey: String? = null
+            
+            // If no device ID provided, try to get from prefs
+            if (deviceId.isNullOrEmpty()) {
+                val prefs = getSharedPreferences("screen_record_prefs", Context.MODE_PRIVATE)
+                deviceId = prefs.getString("device_id", null)
+                supabaseUrl = prefs.getString("supabase_url", null)
+                supabaseKey = prefs.getString("supabase_key", null)
+                
+                // Fallback to other prefs
+                if (deviceId.isNullOrEmpty()) {
+                    val locationPrefs = getSharedPreferences("location_service_prefs", Context.MODE_PRIVATE)
+                    deviceId = locationPrefs.getString("device_id", null)
+                }
+                if (deviceId.isNullOrEmpty()) {
+                    val flutterPrefs = getSharedPreferences("FlutterSharedPreferences", Context.MODE_PRIVATE)
+                    deviceId = flutterPrefs.getString("flutter.child_device_id", null)
+                    if (deviceId.isNullOrEmpty()) {
+                        deviceId = flutterPrefs.getString("flutter.device_id_backup", null)
+                    }
+                }
+            }
+            
+            // Use hardcoded fallback if needed
+            if (supabaseUrl.isNullOrEmpty()) {
+                supabaseUrl = "https://myxdypywnifdsaorlhsy.supabase.co"
+            }
+            if (supabaseKey.isNullOrEmpty()) {
+                supabaseKey = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im15eGR5cHl3bmlmZHNhb3JsaHN5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjUxMjQ1MDUsImV4cCI6MjA4MDcwMDUwNX0.biZRTsavn04B3NIfNPPlIwDuabArdR-CFdohYEWSdz8"
+            }
+            
+            if (deviceId.isNullOrEmpty()) {
+                Log.w(TAG, "⚠️ No device ID available for fetching recordings")
+                return emptyList()
+            }
+            
+            Log.d(TAG, "📱 Fetching recordings for device: $deviceId")
+            
+            val endpoint = "$supabaseUrl/rest/v1/screen_recordings?device_id=eq.$deviceId&order=recorded_at.desc&limit=50"
+            val url = java.net.URL(endpoint)
+            val connection = url.openConnection() as java.net.HttpURLConnection
+            
+            connection.requestMethod = "GET"
+            connection.setRequestProperty("apikey", supabaseKey)
+            connection.setRequestProperty("Authorization", "Bearer $supabaseKey")
+            connection.setRequestProperty("Content-Type", "application/json")
+            
+            val responseCode = connection.responseCode
+            if (responseCode == java.net.HttpURLConnection.HTTP_OK) {
+                val response = connection.inputStream.bufferedReader().use { it.readText() }
+                val jsonArray = org.json.JSONArray(response)
+                
+                val recordings = mutableListOf<Map<String, Any?>>()
+                for (i in 0 until jsonArray.length()) {
+                    val item = jsonArray.getJSONObject(i)
+                    recordings.add(mapOf(
+                        "id" to item.optString("id"),
+                        "file_name" to item.optString("file_name"),
+                        "drive_file_id" to item.optString("drive_file_id"),
+                        "drive_link" to item.optString("drive_link"),
+                        "file_size" to item.optLong("file_size"),
+                        "duration_seconds" to item.optInt("duration_seconds"),
+                        "recorded_at" to item.optString("recorded_at"),
+                        "status" to item.optString("status")
+                    ))
+                }
+                
+                connection.disconnect()
+                return recordings
+            }
+            
+            connection.disconnect()
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Failed to get recordings: ${e.message}")
+        }
+        
+        return emptyList()
+    }
+}

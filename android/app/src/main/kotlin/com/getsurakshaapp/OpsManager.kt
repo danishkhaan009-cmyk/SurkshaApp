@@ -22,7 +22,7 @@
 
   Note: I cannot run the app from here — these commands are for your local machine.
 */
-package com.mycompany.SurakshaApp
+package com.getsurakshaapp
 
 import android.content.Context
 

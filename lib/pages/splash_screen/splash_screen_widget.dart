@@ -1,10 +1,10 @@
-import '/flutter_flow/flutter_flow_theme.dart';
-import '/flutter_flow/flutter_flow_util.dart';
-import '/flutter_flow/flutter_flow_widgets.dart';
-import '/index.dart';
+import 'package:without_database/flutter_flow/flutter_flow_theme.dart';
+import 'package:without_database/flutter_flow/flutter_flow_util.dart';
+import 'package:without_database/flutter_flow/flutter_flow_widgets.dart';
+import 'package:without_database/index.dart';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
-import '/services/child_mode_service.dart';
+import 'package:without_database/services/child_mode_service.dart';
 import 'splash_screen_model.dart';
 export 'splash_screen_model.dart';
 

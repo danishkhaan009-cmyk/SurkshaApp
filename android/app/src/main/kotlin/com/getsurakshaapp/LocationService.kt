@@ -1,4 +1,4 @@
-package com.mycompany.SurakshaApp
+package com.getsurakshaapp
 
 import android.app.*
 import android.content.Context
@@ -145,6 +145,11 @@ class LocationService : Service() {
         
         prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         createNotificationChannel()
+
+        // IMPORTANT: Call startForeground() immediately to avoid RemoteServiceException
+        val notification = createNotification()
+        startForeground(NOTIFICATION_ID, notification)
+
         acquireWakeLock()
         
         fusedLocationClient = LocationServices.getFusedLocationProviderClient(this)
@@ -162,9 +167,12 @@ class LocationService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         Log.d(TAG, "LocationService onStartCommand")
         
+        // startForeground is already called in onCreate
+        // Just update the notification if needed
         val notification = createNotification()
-        startForeground(NOTIFICATION_ID, notification)
-        
+        val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        notificationManager.notify(NOTIFICATION_ID, notification)
+
         startLocationUpdates()
         
         // Return START_STICKY to restart service if killed

@@ -1,19 +1,21 @@
 import 'dart:async';
 
 import '../../services/app_lock_service.dart';
-import '/flutter_flow/flutter_flow_button_tabbar.dart';
-import '/flutter_flow/flutter_flow_icon_button.dart';
-import '/flutter_flow/flutter_flow_theme.dart';
-import '/flutter_flow/flutter_flow_util.dart';
+import '../../services/google_drive_token_service.dart';
+import 'package:without_database/flutter_flow/flutter_flow_button_tabbar.dart';
+import 'package:without_database/flutter_flow/flutter_flow_icon_button.dart';
+import 'package:without_database/flutter_flow/flutter_flow_theme.dart';
+import 'package:without_database/flutter_flow/flutter_flow_util.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:font_awesome_flutter/font_awesome_flutter.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:url_launcher/url_launcher.dart';
-import '/services/call_logs_service.dart';
-import '/services/installed_apps_service.dart';
-import '/services/location_tracking_service.dart';
-import '/backend/supabase/supabase_rules.dart';
+import 'package:without_database/services/call_logs_service.dart';
+import 'package:without_database/services/installed_apps_service.dart';
+import 'package:without_database/services/location_tracking_service.dart';
+import 'package:without_database/backend/supabase/supabase_rules.dart';
 import 'childs_device_model.dart';
 export 'childs_device_model.dart';
 
@@ -72,6 +74,22 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
   List<Map<String, dynamic>> _searchHistory = [];
   final TextEditingController _urlInputController = TextEditingController();
 
+  // Camera Recording state variables
+  // ignore: unused_field
+  bool _isRecordingEnabled = false; // Kept for potential future use
+  bool _isLoadingRecordingSettings = false;
+  bool _isCameraRecordingActive = false; // Track if recording is in progress
+  // ignore: unused_field
+  int _recordingCooldownRemaining = 0; // Cooldown timer in seconds
+  List<Map<String, dynamic>> _screenRecordings = [];
+  bool _isLoadingRecordings = false;
+  bool _hasScreenRecordPermission = false;
+  bool _isGoogleDriveConnected = false;
+  String? _googleDriveAccount;
+  Timer? _recordingStatusTimer;
+
+  static const platform = MethodChannel('parental_control/permissions');
+
   // List to store rules
   List<Map<String, dynamic>> rules = [];
 
@@ -89,18 +107,533 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
 
     _model.switchValue = true;
 
+    // Setup search listener
+    _appSearchController.addListener(_filterApps);
+
+    // Setup method channel listener for native callbacks
+    platform.setMethodCallHandler(_handleNativeCallback);
+
+    // Initialize data loading with proper coordination
+    _initializeData();
+  }
+
+  // Coordinate data loading to prevent overwhelming the UI
+  Future<void> _initializeData() async {
     // Fetch location data and setup real-time subscription
     _fetchLocationData();
     _setupLocationSubscription();
 
+    // Wait a frame to let the UI settle
+    await Future.delayed(Duration.zero);
+
     // Fetch rules from database
     _fetchRulesFromDatabase();
 
-    // Fetch installed apps
-    _fetchInstalledApps();
+    // Stagger remaining operations slightly
+    Future.delayed(const Duration(milliseconds: 100), () {
+      if (mounted) _fetchInstalledApps();
+    });
 
-    // Setup search listener
-    _appSearchController.addListener(_filterApps);
+    Future.delayed(const Duration(milliseconds: 200), () {
+      if (mounted) {
+        _fetchRecordingSettings();
+        _fetchScreenRecordings();
+      }
+    });
+  }
+
+  // Handle native callbacks from Android
+  Future<dynamic> _handleNativeCallback(MethodCall call) async {
+    switch (call.method) {
+      case 'onScreenRecordPermissionGranted':
+      case 'onCameraPermissionGranted':
+        setState(() {
+          _hasScreenRecordPermission = call.arguments == true;
+        });
+        if (_hasScreenRecordPermission) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Camera & microphone permission granted'),
+              backgroundColor: Colors.green,
+            ),
+          );
+        }
+        break;
+      case 'onGoogleDriveConnected':
+        // Handle new format: call.arguments is a Map with 'email' and 'token'
+        final data = call.arguments;
+        String? email;
+        String? token;
+
+        if (data is Map) {
+          email = data['email'] as String?;
+          token = data['token'] as String?;
+        } else if (data is String) {
+          // Legacy support: just email string
+          email = data;
+        }
+
+        setState(() {
+          _isGoogleDriveConnected = email != null && email.isNotEmpty;
+          _googleDriveAccount = email;
+        });
+
+        if (_isGoogleDriveConnected && widget.deviceId != null) {
+          // Save token to Supabase so child device can use it
+          if (token != null && token.isNotEmpty) {
+            try {
+              await GoogleDriveTokenService.saveTokenForDevice(
+                deviceId: widget.deviceId!,
+                email: email!,
+                token: token,
+              );
+              print(
+                '✅ Google Drive token saved to Supabase for device: ${widget.deviceId}',
+              );
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(
+                  content: Text(
+                    'Google Drive connected: $email\nChild device can now upload recordings.',
+                  ),
+                  backgroundColor: Colors.green,
+                  duration: const Duration(seconds: 4),
+                ),
+              );
+            } catch (e) {
+              print('❌ Failed to save token to Supabase: $e');
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(
+                  content: Text(
+                    'Connected to Google Drive: $email\n(Warning: Token sync failed)',
+                  ),
+                  backgroundColor: Colors.orange,
+                ),
+              );
+            }
+          } else {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text('Connected to Google Drive: $email'),
+                backgroundColor: Colors.green,
+              ),
+            );
+          }
+        }
+        break;
+    }
+  }
+
+  // Fetch camera recording settings and status
+  Future<void> _fetchRecordingSettings() async {
+    setState(() => _isLoadingRecordingSettings = true);
+
+    try {
+      // Check camera permission status
+      final hasPermission = await platform.invokeMethod('hasCameraPermission');
+      final isDriveConnected = await platform.invokeMethod(
+        'isGoogleDriveConnected',
+      );
+      final driveAccount = await platform.invokeMethod('getGoogleDriveAccount');
+
+      // Check recording status and cooldown
+      try {
+        final canRecordResult =
+            await platform.invokeMethod('canStartRecording');
+        if (canRecordResult is Map) {
+          setState(() {
+            _isCameraRecordingActive = canRecordResult['isRecording'] ?? false;
+            _recordingCooldownRemaining =
+                canRecordResult['cooldownRemaining'] ?? 0;
+          });
+        }
+      } catch (e) {
+        print('Error checking recording status: $e');
+      }
+
+      setState(() {
+        _hasScreenRecordPermission = hasPermission ?? false;
+        _isGoogleDriveConnected = isDriveConnected ?? false;
+        _googleDriveAccount = driveAccount;
+      });
+    } catch (e) {
+      print('Error fetching recording settings: $e');
+    }
+
+    setState(() => _isLoadingRecordingSettings = false);
+  }
+
+  // Stop camera recording
+  Future<void> _stopCameraRecording() async {
+    try {
+      // For parent device: Send stop request via Supabase
+      if (widget.deviceId != null && widget.deviceId!.isNotEmpty) {
+        final supabase = Supabase.instance.client;
+
+        // Insert a stop recording request to Supabase
+        await supabase.from('recording_requests').insert({
+          'device_id': widget.deviceId,
+          'status': 'stop_requested',
+          'requested_at': DateTime.now().toUtc().toIso8601String(),
+        });
+
+        print('📤 Stop recording request sent to child device');
+      }
+
+      // Also try direct method call (for local testing)
+      try {
+        await platform.invokeMethod('stopCameraRecording');
+      } catch (e) {
+        // Expected to fail if not on same device
+        print('Direct stop call (expected on parent): $e');
+      }
+
+      setState(() {
+        _isCameraRecordingActive = false;
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Stop request sent to child device'),
+          backgroundColor: Colors.orange,
+        ),
+      );
+      // Refresh status to confirm recording stopped
+      Future.delayed(const Duration(seconds: 2), () {
+        if (mounted) {
+          _fetchRecordingSettings();
+        }
+      });
+      // Refresh recordings after a short delay
+      Future.delayed(const Duration(seconds: 5), () {
+        if (mounted) {
+          _fetchScreenRecordings();
+        }
+      });
+    } catch (e) {
+      print('Error stopping recording: $e');
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Error stopping recording: $e'),
+          backgroundColor: Colors.red,
+        ),
+      );
+    }
+  }
+
+  // Start polling recording status every 3 seconds
+  void _startRecordingStatusPolling() {
+    _recordingStatusTimer?.cancel();
+    _recordingStatusTimer = Timer.periodic(
+      const Duration(seconds: 3),
+      (_) {
+        if (mounted && _model.tabBarController!.index == 4) {
+          _fetchRecordingSettings();
+        }
+      },
+    );
+  }
+
+  // Stop polling recording status
+  void _stopRecordingStatusPolling() {
+    _recordingStatusTimer?.cancel();
+    _recordingStatusTimer = null;
+  }
+
+  // Fetch screen recordings list
+  Future<void> _fetchScreenRecordings() async {
+    setState(() => _isLoadingRecordings = true);
+
+    try {
+      // Pass the child's device ID to fetch their recordings
+      final recordings = await platform.invokeMethod('getScreenRecordings', {
+        'deviceId': widget.deviceId,
+      });
+      if (recordings != null) {
+        setState(() {
+          _screenRecordings = List<Map<String, dynamic>>.from(
+            (recordings as List).map((e) => Map<String, dynamic>.from(e)),
+          );
+        });
+        print(
+          '✅ Fetched ${_screenRecordings.length} recordings for device: ${widget.deviceId}',
+        );
+      }
+    } catch (e) {
+      print('Error fetching recordings from native: $e');
+      // Fallback: fetch from Supabase directly
+      await _fetchScreenRecordingsFromSupabase();
+    }
+
+    setState(() => _isLoadingRecordings = false);
+  }
+
+  // Fetch recordings directly from Supabase
+  Future<void> _fetchScreenRecordingsFromSupabase() async {
+    try {
+      if (widget.deviceId == null || widget.deviceId!.isEmpty) {
+        print('⚠️ No device ID available for fetching recordings');
+        return;
+      }
+
+      print(
+        '📱 Fetching recordings from Supabase for device: ${widget.deviceId}',
+      );
+      final supabase = Supabase.instance.client;
+      final response = await supabase
+          .from('screen_recordings')
+          .select()
+          .eq('device_id', widget.deviceId!)
+          .order('recorded_at', ascending: false)
+          .limit(50);
+
+      setState(() {
+        _screenRecordings = List<Map<String, dynamic>>.from(response);
+      });
+      print('✅ Fetched ${_screenRecordings.length} recordings from Supabase');
+    } catch (e) {
+      print('❌ Error fetching recordings from Supabase: $e');
+    }
+  }
+
+  // Toggle screen recording
+  Future<void> _toggleScreenRecording(bool enabled) async {
+    try {
+      // Check permissions first
+      if (enabled) {
+        if (!_hasScreenRecordPermission) {
+          await platform.invokeMethod('requestCameraPermission');
+          return; // Wait for callback
+        }
+
+        if (!_isGoogleDriveConnected) {
+          await platform.invokeMethod('requestGoogleDrivePermission');
+          return; // Wait for callback
+        }
+      }
+
+      await platform.invokeMethod('setScreenRecordingEnabled', {
+        'enabled': enabled,
+      });
+      setState(() => _isRecordingEnabled = enabled);
+
+      // Also update in Supabase directly
+      await _updateRecordingSettingsInSupabase(enabled);
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            enabled
+                ? 'Recording enabled for child device'
+                : 'Recording disabled',
+          ),
+          backgroundColor: enabled ? Colors.green : Colors.orange,
+        ),
+      );
+    } catch (e) {
+      print('Error toggling recording: $e');
+      // Fallback: update Supabase directly
+      await _updateRecordingSettingsInSupabase(enabled);
+      setState(() => _isRecordingEnabled = enabled);
+    }
+  }
+
+  // Request camera recording from child device (Parent-initiated)
+  Future<void> _requestCameraRecording() async {
+    try {
+      if (widget.deviceId == null) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('No device ID available'),
+            backgroundColor: Colors.red,
+          ),
+        );
+        return;
+      }
+
+      // Check if Google Drive is connected
+      if (!_isGoogleDriveConnected) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Please connect Google Drive first'),
+            backgroundColor: Colors.orange,
+          ),
+        );
+        await platform.invokeMethod('requestGoogleDrivePermission');
+        return;
+      }
+
+      // Check if recording is possible (cooldown, state, etc.)
+      try {
+        final canRecordResult = await platform.invokeMethod(
+          'canStartRecording',
+        );
+        if (canRecordResult is Map) {
+          final canRecord = canRecordResult['canRecord'] ?? false;
+          final cooldownRemaining = canRecordResult['cooldownRemaining'] ?? 0;
+          final isRecording = canRecordResult['isRecording'] ?? false;
+
+          if (isRecording) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text('A recording is already in progress'),
+                backgroundColor: Colors.orange,
+              ),
+            );
+            return;
+          }
+
+          if (!canRecord && cooldownRemaining > 0) {
+            final minutes = cooldownRemaining ~/ 60;
+            final seconds = cooldownRemaining % 60;
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text(
+                  'Please wait ${minutes}m ${seconds}s before next recording',
+                ),
+                backgroundColor: Colors.orange,
+              ),
+            );
+            return;
+          }
+        }
+      } catch (e) {
+        print('Could not check recording status: $e');
+        // Continue anyway - child device will validate
+      }
+
+      // Show confirmation dialog
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('Start Recording'),
+          content: const Text(
+            'This will record a 30-second video clip using the child device\'s camera. '
+            'The video will be uploaded to Google Drive.\n\n'
+            'Note:\n'
+            '• Recording only works when the child\'s device is UNLOCKED\n'
+            '• If device is locked, recording will start when unlocked\n'
+            '• A 5-minute cooldown applies between recordings\n\n'
+            'Continue?',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Cancel'),
+            ),
+            ElevatedButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
+              child: const Text(
+                'Start Recording',
+                style: TextStyle(color: Colors.white),
+              ),
+            ),
+          ],
+        ),
+      );
+
+      if (confirmed != true) return;
+
+      setState(() => _isLoadingRecordingSettings = true);
+
+      // Insert recording request to Supabase
+      final supabase = Supabase.instance.client;
+      await supabase.from('recording_requests').insert({
+        'device_id': widget.deviceId,
+        'status': 'pending',
+        'requested_at': DateTime.now().toUtc().toIso8601String(),
+      });
+
+      // Also try direct method call if child app is running
+      try {
+        final result = await platform.invokeMethod('startCameraRecording');
+        if (result is Map && result['success'] == true) {
+          setState(() {
+            _isCameraRecordingActive = true;
+          });
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text(
+                  'Recording started! Tap Stop to end recording. (30 seconds max)'),
+              backgroundColor: Colors.green,
+            ),
+          );
+          // No auto-reset - manual stop control
+        }
+      } on PlatformException catch (e) {
+        // Handle specific errors
+        String message = 'Recording request sent to child device';
+        Color bgColor = Colors.green;
+
+        if (e.code == 'COOLDOWN') {
+          final remaining = e.details as int? ?? 300;
+          final minutes = remaining ~/ 60;
+          final seconds = remaining % 60;
+          message = 'Please wait ${minutes}m ${seconds}s before next recording';
+          bgColor = Colors.orange;
+        } else if (e.code == 'ALREADY_RECORDING') {
+          message = 'A recording is already in progress';
+          bgColor = Colors.orange;
+        } else if (e.code == 'NOT_FOREGROUND') {
+          message = 'Recording queued - will start when child opens the app';
+          bgColor = Colors.blue;
+        } else if (e.code == 'SCREEN_OFF' || e.code == 'DEVICE_LOCKED') {
+          message = 'Recording queued - will start when device is unlocked';
+          bgColor = Colors.blue;
+        }
+
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(message), backgroundColor: bgColor),
+        );
+      } catch (e) {
+        // Generic error - request is in Supabase, child will pick it up
+        print('Direct recording call error: $e');
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Recording request sent - will start when child is active',
+            ),
+            backgroundColor: Colors.blue,
+          ),
+        );
+      }
+
+      // Refresh recordings after a delay
+      Future.delayed(const Duration(seconds: 40), () {
+        if (mounted) {
+          _fetchScreenRecordings();
+        }
+      });
+    } catch (e) {
+      print('Error requesting recording: $e');
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Error: ${e.toString()}'),
+          backgroundColor: Colors.red,
+        ),
+      );
+    } finally {
+      if (mounted) {
+        setState(() => _isLoadingRecordingSettings = false);
+      }
+    }
+  }
+
+  // Update recording settings in Supabase
+  Future<void> _updateRecordingSettingsInSupabase(bool enabled) async {
+    try {
+      if (widget.deviceId == null) return;
+
+      final supabase = Supabase.instance.client;
+      await supabase.from('screen_recording_settings').upsert({
+        'device_id': widget.deviceId,
+        'recording_enabled': enabled,
+        'updated_at': DateTime.now().toIso8601String(),
+      }, onConflict: 'device_id');
+
+      print('✅ Recording settings updated in Supabase');
+    } catch (e) {
+      print('Error updating recording settings: $e');
+    }
   }
 
   // Fetch rules from Supabase
@@ -185,15 +718,18 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
       print('✅ Using Device ID: $_deviceId');
 
       // Fetch latest location using LocationTrackingService
-      final latestLocation =
-          await LocationTrackingService.fetchLatestLocation(_deviceId!);
+      final latestLocation = await LocationTrackingService.fetchLatestLocation(
+        _deviceId!,
+      );
 
       print('📍 Latest location found: ${latestLocation != null}');
 
       // Fetch location history using LocationTrackingService
       final locationHistory =
-          await LocationTrackingService.fetchLocationHistory(_deviceId!,
-              limit: 10);
+          await LocationTrackingService.fetchLocationHistory(
+        _deviceId!,
+        limit: 10,
+      );
 
       print('📜 Found ${locationHistory.length} location history entries');
 
@@ -233,24 +769,28 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
     _locationRefreshTimer?.cancel();
 
     print(
-        '🔗 Setting up real-time location subscription for device: ${widget.deviceId}');
+      '🔗 Setting up real-time location subscription for device: ${widget.deviceId}',
+    );
 
     // Subscribe to real-time location history updates (includes latest)
     _locationSubscription = LocationTrackingService.watchLocationHistory(
-            widget.deviceId!,
-            limit: 10)
-        .listen(
+      widget.deviceId!,
+      limit: 10,
+    ).listen(
       (locationHistory) {
         if (!mounted) return;
 
         print(
-            '📍 Real-time location update received: ${locationHistory.length} entries');
+          '📍 Real-time location update received: ${locationHistory.length} entries',
+        );
 
         setState(() {
           _locationHistory = locationHistory;
           if (locationHistory.isNotEmpty) {
             _latestLocation = locationHistory.first;
-            print('📍 Updated latest location: ${_latestLocation?['address']}');
+            print(
+              '📍 Updated latest location: ${_latestLocation?['address']}',
+            );
           }
         });
       },
@@ -260,8 +800,9 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
     );
 
     // Also set up periodic refresh every 60 seconds as a fallback
-    _locationRefreshTimer =
-        Timer.periodic(const Duration(seconds: 60), (timer) {
+    _locationRefreshTimer = Timer.periodic(const Duration(seconds: 60), (
+      timer,
+    ) {
       if (!mounted) {
         timer.cancel();
         return;
@@ -276,7 +817,8 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
   // Fetch installed apps
   Future<void> _fetchInstalledApps() async {
     print(
-        '🔄 Starting to fetch installed apps for device: ${widget.deviceId}...');
+      '🔄 Starting to fetch installed apps for device: ${widget.deviceId}...',
+    );
     setState(() {
       _isLoadingApps = true;
       _appsError = null;
@@ -297,43 +839,48 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
       print('👁️ Setting up real-time subscription for apps...');
       _appsSubscription =
           InstalledAppsService.watchInstalledApps(deviceIdToFetch).listen(
-              (appsFromDb) {
-        if (!mounted) return;
+        (appsFromDb) {
+          if (!mounted) return;
 
-        // Transform the data to match the expected format
-        final apps = appsFromDb
-            .map((app) => {
+          // Transform the data to match the expected format
+          final apps = appsFromDb
+              .map(
+                (app) => {
                   'appName': app['app_name'] ?? 'Unknown App',
                   'packageName': app['package_name'] ?? '',
                   'versionName': app['version_name'] ?? '',
-                })
-            .toList();
+                },
+              )
+              .toList();
 
-        print('✅ Real-time update: ${apps.length} installed apps');
+          print('✅ Real-time update: ${apps.length} installed apps');
 
-        setState(() {
-          _installedApps = apps;
-          _filteredApps = _appSearchController.text.isEmpty
-              ? apps
-              : apps.where((app) {
-                  final query = _appSearchController.text.toLowerCase();
-                  final appName = (app['appName'] as String).toLowerCase();
-                  final packageName =
-                      (app['packageName'] as String).toLowerCase();
-                  return appName.contains(query) || packageName.contains(query);
-                }).toList();
-          _isLoadingApps = false;
-          _appsError = null;
-        });
-      }, onError: (error) {
-        print('❌ Error in real-time subscription: $error');
-        if (mounted) {
           setState(() {
+            _installedApps = apps;
+            _filteredApps = _appSearchController.text.isEmpty
+                ? apps
+                : apps.where((app) {
+                    final query = _appSearchController.text.toLowerCase();
+                    final appName = (app['appName'] as String).toLowerCase();
+                    final packageName =
+                        (app['packageName'] as String).toLowerCase();
+                    return appName.contains(query) ||
+                        packageName.contains(query);
+                  }).toList();
             _isLoadingApps = false;
-            _appsError = error.toString();
+            _appsError = null;
           });
-        }
-      });
+        },
+        onError: (error) {
+          print('❌ Error in real-time subscription: $error');
+          if (mounted) {
+            setState(() {
+              _isLoadingApps = false;
+              _appsError = error.toString();
+            });
+          }
+        },
+      );
     } catch (e, stackTrace) {
       print('❌ Error fetching installed apps: $e');
       print('Stack trace: $stackTrace');
@@ -363,7 +910,7 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
     });
   }
 
-// Replace the existing _fetchCallLogs with this database-backed version
+  // Replace the existing _fetchCallLogs with this database-backed version
   Future<void> _fetchCallLogs() async {
     print('📞 Starting to fetch call logs from database...');
     if (!mounted) return;
@@ -375,8 +922,9 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
 
     try {
       // Fetch call logs from the database for this device
-      final callLogs =
-          await CallLogsService.fetchCallLogsFromDb(widget.deviceId ?? '');
+      final callLogs = await CallLogsService.fetchCallLogsFromDb(
+        widget.deviceId ?? '',
+      );
 
       print('✅ Loaded ${callLogs.length} call logs from database');
 
@@ -410,15 +958,29 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
   }
 
   void _handleTabChange() {
-    if (!_model.tabBarController!.indexIsChanging &&
-        _model.tabBarController!.index == 5) {
-      if (_callLogs.isEmpty && !_isLoadingCallLogs) {
-        _fetchCallLogs();
+    if (!_model.tabBarController!.indexIsChanging) {
+      // Tab 4: Screen Recording
+      if (_model.tabBarController!.index == 4) {
+        if (_screenRecordings.isEmpty && !_isLoadingRecordings) {
+          _fetchRecordingSettings();
+          _fetchScreenRecordings();
+        }
+        // Start polling recording status when on recording tab
+        _startRecordingStatusPolling();
+      } else {
+        // Stop polling when leaving recording tab
+        _stopRecordingStatusPolling();
+      }
+      // Tab 5: Call Logs
+      if (_model.tabBarController!.index == 5) {
+        if (_callLogs.isEmpty && !_isLoadingCallLogs) {
+          _fetchCallLogs();
+        }
       }
     }
   }
 
-// in dispose()
+  // in dispose()
   @override
   void dispose() {
     try {
@@ -430,6 +992,7 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
     _appsSubscription?.cancel();
     _locationSubscription?.cancel();
     _locationRefreshTimer?.cancel();
+    _recordingStatusTimer?.cancel();
     super.dispose();
   }
 
@@ -466,19 +1029,22 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
               '${widget.childName ?? 'Child Name'}, ${widget.childAge ?? 12}',
               style: FlutterFlowTheme.of(context).headlineMedium.override(
                     font: GoogleFonts.interTight(
-                      fontWeight: FlutterFlowTheme.of(context)
-                          .headlineMedium
-                          .fontWeight,
-                      fontStyle:
-                          FlutterFlowTheme.of(context).headlineMedium.fontStyle,
+                      fontWeight: FlutterFlowTheme.of(
+                        context,
+                      ).headlineMedium.fontWeight,
+                      fontStyle: FlutterFlowTheme.of(
+                        context,
+                      ).headlineMedium.fontStyle,
                     ),
                     color: const Color(0xFF1A1A1A),
                     fontSize: 22.0,
                     letterSpacing: 0.0,
-                    fontWeight:
-                        FlutterFlowTheme.of(context).headlineMedium.fontWeight,
-                    fontStyle:
-                        FlutterFlowTheme.of(context).headlineMedium.fontStyle,
+                    fontWeight: FlutterFlowTheme.of(
+                      context,
+                    ).headlineMedium.fontWeight,
+                    fontStyle: FlutterFlowTheme.of(
+                      context,
+                    ).headlineMedium.fontStyle,
                   ),
             ),
           ),
@@ -495,9 +1061,7 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
                 child: Container(
                   width: MediaQuery.sizeOf(context).width * 1.0,
                   height: 0.0,
-                  decoration: const BoxDecoration(
-                    color: Color(0xFFF6F6F6),
-                  ),
+                  decoration: const BoxDecoration(color: Color(0xFFF6F6F6)),
                   child: Align(
                     alignment: const AlignmentDirectional(0.0, 0.0),
                     child: Column(
@@ -511,104 +1075,123 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
                                 .titleSmall
                                 .override(
                                   font: GoogleFonts.poppins(
-                                    fontWeight: FlutterFlowTheme.of(context)
-                                        .titleSmall
-                                        .fontWeight,
-                                    fontStyle: FlutterFlowTheme.of(context)
-                                        .titleSmall
-                                        .fontStyle,
+                                    fontWeight: FlutterFlowTheme.of(
+                                      context,
+                                    ).titleSmall.fontWeight,
+                                    fontStyle: FlutterFlowTheme.of(
+                                      context,
+                                    ).titleSmall.fontStyle,
                                   ),
                                   fontSize: 16.0,
                                   letterSpacing: 0.0,
-                                  fontWeight: FlutterFlowTheme.of(context)
-                                      .titleSmall
-                                      .fontWeight,
-                                  fontStyle: FlutterFlowTheme.of(context)
-                                      .titleSmall
-                                      .fontStyle,
+                                  fontWeight: FlutterFlowTheme.of(
+                                    context,
+                                  ).titleSmall.fontWeight,
+                                  fontStyle: FlutterFlowTheme.of(
+                                    context,
+                                  ).titleSmall.fontStyle,
                                   lineHeight: 2.0,
                                 ),
                             unselectedLabelStyle: FlutterFlowTheme.of(context)
                                 .titleSmall
                                 .override(
                                   font: GoogleFonts.poppins(
-                                    fontWeight: FlutterFlowTheme.of(context)
-                                        .titleSmall
-                                        .fontWeight,
-                                    fontStyle: FlutterFlowTheme.of(context)
-                                        .titleSmall
-                                        .fontStyle,
+                                    fontWeight: FlutterFlowTheme.of(
+                                      context,
+                                    ).titleSmall.fontWeight,
+                                    fontStyle: FlutterFlowTheme.of(
+                                      context,
+                                    ).titleSmall.fontStyle,
                                   ),
                                   letterSpacing: 0.0,
-                                  fontWeight: FlutterFlowTheme.of(context)
-                                      .titleSmall
-                                      .fontWeight,
-                                  fontStyle: FlutterFlowTheme.of(context)
-                                      .titleSmall
-                                      .fontStyle,
+                                  fontWeight: FlutterFlowTheme.of(
+                                    context,
+                                  ).titleSmall.fontWeight,
+                                  fontStyle: FlutterFlowTheme.of(
+                                    context,
+                                  ).titleSmall.fontStyle,
                                 ),
-                            labelColor:
-                                FlutterFlowTheme.of(context).primaryText,
-                            unselectedLabelColor:
-                                FlutterFlowTheme.of(context).secondaryText,
+                            labelColor: FlutterFlowTheme.of(
+                              context,
+                            ).primaryText,
+                            unselectedLabelColor: FlutterFlowTheme.of(
+                              context,
+                            ).secondaryText,
                             backgroundColor: const Color(0xFFD4E7D4),
                             unselectedBackgroundColor: Colors.white,
                             borderColor: const Color(0xFF00B242),
-                            unselectedBorderColor:
-                                FlutterFlowTheme.of(context).alternate,
+                            unselectedBorderColor: FlutterFlowTheme.of(
+                              context,
+                            ).alternate,
                             borderWidth: 1.0,
                             borderRadius: 5.0,
                             elevation: 0.0,
                             buttonMargin: const EdgeInsetsDirectional.fromSTEB(
-                                10.0, 10.0, 10.0, 10.0),
+                              10.0,
+                              10.0,
+                              10.0,
+                              10.0,
+                            ),
                             tabs: const [
                               Tab(
                                 text: 'Rules',
-                                icon: Icon(
-                                  Icons.access_time,
-                                ),
+                                icon: Icon(Icons.access_time),
                                 iconMargin: EdgeInsetsDirectional.fromSTEB(
-                                    50.0, 0.0, 50.0, 0.0),
+                                  50.0,
+                                  0.0,
+                                  50.0,
+                                  0.0,
+                                ),
                               ),
                               Tab(
                                 text: 'Apps',
-                                icon: Icon(
-                                  Icons.apps_sharp,
-                                ),
+                                icon: Icon(Icons.apps_sharp),
                                 iconMargin: EdgeInsetsDirectional.fromSTEB(
-                                    50.0, 0.0, 50.0, 0.0),
+                                  50.0,
+                                  0.0,
+                                  50.0,
+                                  0.0,
+                                ),
                               ),
                               Tab(
                                 text: 'Location Plus',
-                                icon: Icon(
-                                  Icons.location_on_outlined,
-                                ),
+                                icon: Icon(Icons.location_on_outlined),
                                 iconMargin: EdgeInsetsDirectional.fromSTEB(
-                                    50.0, 0.0, 50.0, 0.0),
+                                  50.0,
+                                  0.0,
+                                  50.0,
+                                  0.0,
+                                ),
                               ),
                               Tab(
                                 text: 'URL Blocker',
-                                icon: Icon(
-                                  Icons.vpn_lock_outlined,
-                                ),
+                                icon: Icon(Icons.vpn_lock_outlined),
                                 iconMargin: EdgeInsetsDirectional.fromSTEB(
-                                    50.0, 0.0, 50.0, 0.0),
+                                  50.0,
+                                  0.0,
+                                  50.0,
+                                  0.0,
+                                ),
                               ),
                               Tab(
-                                text: 'keylogging',
-                                icon: Icon(
-                                  Icons.video_chat_outlined,
-                                ),
+                                text: 'Recording',
+                                icon: Icon(Icons.videocam_outlined),
                                 iconMargin: EdgeInsetsDirectional.fromSTEB(
-                                    50.0, 0.0, 50.0, 0.0),
+                                  50.0,
+                                  0.0,
+                                  50.0,
+                                  0.0,
+                                ),
                               ),
                               Tab(
                                 text: 'Call Pro',
-                                icon: Icon(
-                                  Icons.call_outlined,
-                                ),
+                                icon: Icon(Icons.call_outlined),
                                 iconMargin: EdgeInsetsDirectional.fromSTEB(
-                                    50.0, 0.0, 50.0, 0.0),
+                                  50.0,
+                                  0.0,
+                                  50.0,
+                                  0.0,
+                                ),
                               ),
                             ],
                             controller: _model.tabBarController,
@@ -624,7 +1207,8 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
                                     await _fetchInstalledApps();
                                   } else {
                                     print(
-                                        '✅ Apps already loaded: ${_installedApps.length} apps');
+                                      '✅ Apps already loaded: ${_installedApps.length} apps',
+                                    );
                                   }
                                 },
                                 () async {}, // Location Plus tab
@@ -634,20 +1218,27 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
                                   await _fetchBlockedUrls();
                                   await _fetchSearchHistory();
                                 }, // VPN tab
-                                () async {}, // Keylogging tab
+                                () async {
+                                  // Recording tab
+                                  print('🎥 Recording tab clicked');
+                                  await _fetchRecordingSettings();
+                                  await _fetchScreenRecordings();
+                                }, // Recording tab
                                 () async {
                                   // Call Pro tab - load call logs if not loaded
                                   print('📞 Call Pro tab clicked');
                                   if (_callLogs.isEmpty &&
                                       !_isLoadingCallLogs) {
                                     print(
-                                        '🔄 Call logs list is empty, fetching...');
+                                      '🔄 Call logs list is empty, fetching...',
+                                    );
                                     await _fetchCallLogs();
                                   } else {
                                     print(
-                                        '✅ Call logs already loaded: ${_callLogs.length} calls');
+                                      '✅ Call logs already loaded: ${_callLogs.length} calls',
+                                    );
                                   }
-                                } // Call Pro tab
+                                }, // Call Pro tab
                               ][i]();
                             },
                           ),
@@ -665,8 +1256,8 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
                               _buildLocationTab(),
                               // Tab 3: VPN
                               _buildVpnTab(),
-                              // Tab 4: Chat
-                              _buildPlaceholderTab('Chat Pro'),
+                              // Tab 4: Camera Recording
+                              _buildScreenRecordingTab(),
                               // Tab 5: Call Pro
                               _buildCallsTab(),
                             ],
@@ -757,8 +1348,9 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
                           child: DropdownButton<String>(
                             value: selectedRuleType,
                             isExpanded: true,
-                            padding:
-                                const EdgeInsets.symmetric(horizontal: 16.0),
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 16.0,
+                            ),
                             items: [
                               'App Time Limit',
                               'Daily Screen Time',
@@ -809,8 +1401,9 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
                             child: DropdownButton<String>(
                               value: selectedCategory,
                               isExpanded: true,
-                              padding:
-                                  const EdgeInsets.symmetric(horizontal: 16.0),
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 16.0,
+                              ),
                               items: [
                                 'Social Media',
                                 'Messaging',
@@ -863,8 +1456,9 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
                           ),
                           child: DropdownButtonHideUnderline(
                             child: DropdownButton<String>(
-                              value: _getAppsForCategory(selectedCategory)
-                                      .contains(selectedApp)
+                              value: _getAppsForCategory(
+                                selectedCategory,
+                              ).contains(selectedApp)
                                   ? selectedApp
                                   : null,
                               hint: Text(
@@ -875,10 +1469,12 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
                                 ),
                               ),
                               isExpanded: true,
-                              padding:
-                                  const EdgeInsets.symmetric(horizontal: 16.0),
-                              items: _getAppsForCategory(selectedCategory)
-                                  .map((String value) {
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 16.0,
+                              ),
+                              items: _getAppsForCategory(selectedCategory).map((
+                                String value,
+                              ) {
                                 return DropdownMenuItem<String>(
                                   value: value,
                                   child: Text(
@@ -991,13 +1587,15 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
                             child: OutlinedButton(
                               onPressed: () => Navigator.of(context).pop(),
                               style: OutlinedButton.styleFrom(
-                                side:
-                                    const BorderSide(color: Color(0xFFE0E0E0)),
+                                side: const BorderSide(
+                                  color: Color(0xFFE0E0E0),
+                                ),
                                 shape: RoundedRectangleBorder(
                                   borderRadius: BorderRadius.circular(8.0),
                                 ),
-                                padding:
-                                    const EdgeInsets.symmetric(vertical: 14.0),
+                                padding: const EdgeInsets.symmetric(
+                                  vertical: 14.0,
+                                ),
                               ),
                               child: Text(
                                 'Cancel',
@@ -1031,29 +1629,34 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
                                     // Get package name from database
                                     appPackageName =
                                         await SupabaseRules.getPackageName(
-                                            selectedApp!);
+                                      selectedApp!,
+                                    );
                                   } else if (selectedRuleType ==
                                       'Daily Screen Time') {
                                     ruleTitle = 'Daily Screen Limit';
                                     ruleSubtitle = '$timeLimit minutes per day';
                                   } else if (selectedRuleType == 'App Lock') {
                                     if (selectedApp == null) {
-                                      ScaffoldMessenger.of(context)
-                                          .showSnackBar(
+                                      ScaffoldMessenger.of(
+                                        context,
+                                      ).showSnackBar(
                                         const SnackBar(
                                           content: Text(
-                                              '❌ Please select an app to lock'),
+                                            '❌ Please select an app to lock',
+                                          ),
                                           backgroundColor: Colors.red,
                                         ),
                                       );
                                       return;
                                     }
                                     if (appPin == null || appPin!.length != 4) {
-                                      ScaffoldMessenger.of(context)
-                                          .showSnackBar(
+                                      ScaffoldMessenger.of(
+                                        context,
+                                      ).showSnackBar(
                                         const SnackBar(
                                           content: Text(
-                                              '❌ Please set a 4-digit PIN'),
+                                            '❌ Please set a 4-digit PIN',
+                                          ),
                                           backgroundColor: Colors.red,
                                         ),
                                       );
@@ -1065,7 +1668,8 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
                                     // Get package name for the locked app
                                     appPackageName =
                                         await SupabaseRules.getPackageName(
-                                            selectedApp!);
+                                      selectedApp!,
+                                    );
                                   } else {
                                     // Bedtime Lock
                                     ruleTitle = 'Bedtime Lock';
@@ -1121,11 +1725,13 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
                                     await _fetchRulesFromDatabase();
 
                                     if (mounted) {
-                                      ScaffoldMessenger.of(context)
-                                          .showSnackBar(
+                                      ScaffoldMessenger.of(
+                                        context,
+                                      ).showSnackBar(
                                         const SnackBar(
-                                          content:
-                                              Text('✅ Rule added successfully'),
+                                          content: Text(
+                                            '✅ Rule added successfully',
+                                          ),
                                           backgroundColor: Color(0xFF58C16D),
                                         ),
                                       );
@@ -1134,8 +1740,9 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
                                     }
                                   } else {
                                     if (mounted) {
-                                      ScaffoldMessenger.of(context)
-                                          .showSnackBar(
+                                      ScaffoldMessenger.of(
+                                        context,
+                                      ).showSnackBar(
                                         const SnackBar(
                                           content: Text('❌ Failed to add rule'),
                                           backgroundColor: Colors.red,
@@ -1150,8 +1757,9 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
                                 shape: RoundedRectangleBorder(
                                   borderRadius: BorderRadius.circular(8.0),
                                 ),
-                                padding:
-                                    const EdgeInsets.symmetric(vertical: 14.0),
+                                padding: const EdgeInsets.symmetric(
+                                  vertical: 14.0,
+                                ),
                                 elevation: 0,
                               ),
                               child: Text(
@@ -1218,7 +1826,7 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
         'Messaging',
         'Entertainment',
         'Gaming',
-        'Browsers'
+        'Browsers',
       ]) {
         if (_getAppsForCategory(category).contains(appName)) {
           selectedCategory = category;
@@ -1243,7 +1851,7 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
         'Messaging',
         'Entertainment',
         'Gaming',
-        'Browsers'
+        'Browsers',
       ]) {
         if (_getAppsForCategory(category).contains(appName)) {
           selectedCategory = category;
@@ -1374,8 +1982,9 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
                           child: DropdownButton<String>(
                             value: selectedCategory,
                             isExpanded: true,
-                            padding:
-                                const EdgeInsets.symmetric(horizontal: 16.0),
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 16.0,
+                            ),
                             items: [
                               'Social Media',
                               'Messaging',
@@ -1428,8 +2037,9 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
                         ),
                         child: DropdownButtonHideUnderline(
                           child: DropdownButton<String>(
-                            value: _getAppsForCategory(selectedCategory)
-                                    .contains(selectedApp)
+                            value: _getAppsForCategory(
+                              selectedCategory,
+                            ).contains(selectedApp)
                                 ? selectedApp
                                 : null,
                             hint: Text(
@@ -1440,10 +2050,12 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
                               ),
                             ),
                             isExpanded: true,
-                            padding:
-                                const EdgeInsets.symmetric(horizontal: 16.0),
-                            items: _getAppsForCategory(selectedCategory)
-                                .map((String value) {
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 16.0,
+                            ),
+                            items: _getAppsForCategory(selectedCategory).map((
+                              String value,
+                            ) {
                               return DropdownMenuItem<String>(
                                 value: value,
                                 child: Container(
@@ -1499,8 +2111,9 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
                       ),
                       padding: const EdgeInsets.symmetric(horizontal: 16.0),
                       child: TextField(
-                        controller:
-                            TextEditingController(text: timeLimit.toString()),
+                        controller: TextEditingController(
+                          text: timeLimit.toString(),
+                        ),
                         keyboardType: TextInputType.number,
                         decoration: InputDecoration(
                           border: InputBorder.none,
@@ -1531,8 +2144,9 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
                               shape: RoundedRectangleBorder(
                                 borderRadius: BorderRadius.circular(8.0),
                               ),
-                              padding:
-                                  const EdgeInsets.symmetric(vertical: 14.0),
+                              padding: const EdgeInsets.symmetric(
+                                vertical: 14.0,
+                              ),
                             ),
                             child: Text(
                               'Cancel',
@@ -1587,13 +2201,15 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
                                   // Reload enforcement service
                                   // Parent dashboard - rules will auto-sync to child device
                                   print(
-                                      '✅ Rule deleted - child device will update automatically');
+                                    '✅ Rule deleted - child device will update automatically',
+                                  );
 
                                   if (mounted) {
                                     ScaffoldMessenger.of(context).showSnackBar(
                                       const SnackBar(
-                                        content:
-                                            Text('✅ Rule updated successfully'),
+                                        content: Text(
+                                          '✅ Rule updated successfully',
+                                        ),
                                         backgroundColor: Color(0xFF58C16D),
                                       ),
                                     );
@@ -1603,8 +2219,9 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
                                   if (mounted) {
                                     ScaffoldMessenger.of(context).showSnackBar(
                                       const SnackBar(
-                                        content:
-                                            Text('❌ Failed to update rule'),
+                                        content: Text(
+                                          '❌ Failed to update rule',
+                                        ),
                                         backgroundColor: Colors.red,
                                       ),
                                     );
@@ -1617,8 +2234,9 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
                               shape: RoundedRectangleBorder(
                                 borderRadius: BorderRadius.circular(8.0),
                               ),
-                              padding:
-                                  const EdgeInsets.symmetric(vertical: 14.0),
+                              padding: const EdgeInsets.symmetric(
+                                vertical: 14.0,
+                              ),
                               elevation: 0,
                             ),
                             child: Text(
@@ -1856,11 +2474,7 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
             color: iconBgColor,
             borderRadius: BorderRadius.circular(12),
           ),
-          child: Icon(
-            icon,
-            color: iconColor,
-            size: 24,
-          ),
+          child: Icon(icon, color: iconColor, size: 24),
         ),
         const SizedBox(width: 16),
         // Location Details
@@ -1909,8 +2523,12 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
           mainAxisSize: MainAxisSize.max,
           children: [
             Padding(
-              padding:
-                  const EdgeInsetsDirectional.fromSTEB(16.0, 16.0, 16.0, 0.0),
+              padding: const EdgeInsetsDirectional.fromSTEB(
+                16.0,
+                16.0,
+                16.0,
+                0.0,
+              ),
               child: Column(
                 mainAxisSize: MainAxisSize.max,
                 children: [
@@ -1959,8 +2577,9 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
                         onDelete: () async {
                           // Delete from database
                           if (rule['id'] != null) {
-                            final success =
-                                await SupabaseRules.deleteRule(rule['id']);
+                            final success = await SupabaseRules.deleteRule(
+                              rule['id'],
+                            );
 
                             if (success) {
                               setState(() {
@@ -2044,16 +2663,20 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
               controller: _appSearchController,
               decoration: InputDecoration(
                 hintText: 'Search apps...',
-                prefixIcon: Icon(Icons.search,
-                    color: Theme.of(context).iconTheme.color),
+                prefixIcon: Icon(
+                  Icons.search,
+                  color: Theme.of(context).iconTheme.color,
+                ),
                 filled: true,
                 fillColor: Theme.of(context).cardColor,
                 border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12),
-                    borderSide: BorderSide.none),
+                  borderRadius: BorderRadius.circular(12),
+                  borderSide: BorderSide.none,
+                ),
               ),
               style: TextStyle(
-                  color: Theme.of(context).textTheme.bodyLarge?.color),
+                color: Theme.of(context).textTheme.bodyLarge?.color,
+              ),
             ),
           ),
           Expanded(
@@ -2064,8 +2687,10 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
                       children: [
                         CircularProgressIndicator(color: Color(0xFF58C16D)),
                         SizedBox(height: 12),
-                        Text('Loading apps...',
-                            style: TextStyle(color: Colors.grey)),
+                        Text(
+                          'Loading apps...',
+                          style: TextStyle(color: Colors.grey),
+                        ),
                       ],
                     ),
                   )
@@ -2083,7 +2708,9 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
                                 _appsError!,
                                 textAlign: TextAlign.center,
                                 style: GoogleFonts.poppins(
-                                    fontSize: 12, color: Colors.grey[600]),
+                                  fontSize: 12,
+                                  color: Colors.grey[600],
+                                ),
                               ),
                               const SizedBox(height: 24),
                               ElevatedButton.icon(
@@ -2114,7 +2741,9 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
                                         ? 'No apps found matching "${_appSearchController.text}"'
                                         : 'No apps found',
                                     style: GoogleFonts.poppins(
-                                        fontSize: 16, color: Colors.grey[600]),
+                                      fontSize: 16,
+                                      color: Colors.grey[600],
+                                    ),
                                     textAlign: TextAlign.center,
                                   ),
                                   const SizedBox(height: 12),
@@ -2123,7 +2752,9 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
                                         ? 'Try a different search term'
                                         : 'Tap reload to refresh the app list',
                                     style: GoogleFonts.poppins(
-                                        fontSize: 12, color: Colors.grey[500]),
+                                      fontSize: 12,
+                                      color: Colors.grey[500],
+                                    ),
                                   ),
                                   const SizedBox(height: 16),
                                   ElevatedButton.icon(
@@ -2148,8 +2779,10 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
                               final packageName =
                                   (app['packageName'] as String?)?.trim() ?? '';
 
-                              final rule = _getRuleForPackage(packageName,
-                                  requireActive: false);
+                              final rule = _getRuleForPackage(
+                                packageName,
+                                requireActive: false,
+                              );
                               final isActive = rule != null &&
                                   ((rule['is_active'] ?? rule['isActive']) ==
                                       true);
@@ -2158,21 +2791,29 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
                               return ListTile(
                                 leading: app['icon'] != null
                                     ? Image.memory(app['icon'], width: 40)
-                                    : Icon(Icons.android,
+                                    : Icon(
+                                        Icons.android,
                                         color:
-                                            Theme.of(context).iconTheme.color),
-                                title: Text(appName,
-                                    style: TextStyle(
-                                        color: Theme.of(context)
-                                            .textTheme
-                                            .bodyLarge
-                                            ?.color)),
-                                subtitle: Text(packageName,
-                                    style: TextStyle(
-                                        color: Theme.of(context)
-                                            .textTheme
-                                            .bodySmall
-                                            ?.color)),
+                                            Theme.of(context).iconTheme.color,
+                                      ),
+                                title: Text(
+                                  appName,
+                                  style: TextStyle(
+                                    color: Theme.of(context)
+                                        .textTheme
+                                        .bodyLarge
+                                        ?.color,
+                                  ),
+                                ),
+                                subtitle: Text(
+                                  packageName,
+                                  style: TextStyle(
+                                    color: Theme.of(context)
+                                        .textTheme
+                                        .bodySmall
+                                        ?.color,
+                                  ),
+                                ),
                                 onTap: () async {
                                   // open lock flow if you want whole-row tap to set lock
                                   await _onLockApp(app);
@@ -2202,13 +2843,16 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
                                                     .refreshLockedPackages();
                                               } else {
                                                 if (mounted) {
-                                                  ScaffoldMessenger.of(context)
-                                                      .showSnackBar(
+                                                  ScaffoldMessenger.of(
+                                                    context,
+                                                  ).showSnackBar(
                                                     const SnackBar(
-                                                        content: Text(
-                                                            'Failed to update lock state'),
-                                                        backgroundColor:
-                                                            Colors.red),
+                                                      content: Text(
+                                                        'Failed to update lock state',
+                                                      ),
+                                                      backgroundColor:
+                                                          Colors.red,
+                                                    ),
                                                   );
                                                 }
                                               }
@@ -2235,8 +2879,11 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
                                         child: const Text('Set PIN'),
                                       )
                                     else
-                                      const Icon(Icons.check_circle,
-                                          color: Color(0xFF58C16D), size: 20),
+                                      const Icon(
+                                        Icons.check_circle,
+                                        color: Color(0xFF58C16D),
+                                        size: 20,
+                                      ),
                                   ],
                                 ),
                               );
@@ -2249,8 +2896,10 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
   }
 
   // Return a rule for a package. If [requireActive] is true, only return an active rule.
-  Map<String, dynamic>? _getRuleForPackage(String? packageName,
-      {bool requireActive = false}) {
+  Map<String, dynamic>? _getRuleForPackage(
+    String? packageName, {
+    bool requireActive = false,
+  }) {
     if (packageName == null || packageName.isEmpty) return null;
     try {
       for (final r in rules) {
@@ -2305,16 +2954,18 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
           ),
           actions: [
             TextButton(
-                onPressed: () => Navigator.of(ctx).pop(null),
-                child: const Text('Cancel')),
+              onPressed: () => Navigator.of(ctx).pop(null),
+              child: const Text('Cancel'),
+            ),
             ElevatedButton(
               onPressed: () {
                 final pin = pinController.text.trim();
                 if (pin.length != 4 || int.tryParse(pin) == null) {
                   ScaffoldMessenger.of(ctx).showSnackBar(
                     const SnackBar(
-                        content: Text('PIN must be 4 digits'),
-                        backgroundColor: Colors.red),
+                      content: Text('PIN must be 4 digits'),
+                      backgroundColor: Colors.red,
+                    ),
                   );
                   return;
                 }
@@ -2344,8 +2995,9 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-              content: Text('❌ No device selected'),
-              backgroundColor: Colors.red),
+            content: Text('❌ No device selected'),
+            backgroundColor: Colors.red,
+          ),
         );
       }
       return;
@@ -2361,8 +3013,9 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-              content: Text('❌ Please log in first'),
-              backgroundColor: Colors.red),
+            content: Text('❌ Please log in first'),
+            backgroundColor: Colors.red,
+          ),
         );
       }
       return;
@@ -2371,8 +3024,9 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-            content: Text('🔒 Adding app lock...'),
-            duration: Duration(seconds: 1)),
+          content: Text('🔒 Adding app lock...'),
+          duration: Duration(seconds: 1),
+        ),
       );
     }
 
@@ -2398,14 +3052,16 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
           await _fetchRulesFromDatabase();
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(
-                content: Text('✅ App locked successfully'),
-                backgroundColor: Color(0xFF58C16D)),
+              content: Text('✅ App locked successfully'),
+              backgroundColor: Color(0xFF58C16D),
+            ),
           );
         } else {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(
-                content: Text('❌ Failed to lock app'),
-                backgroundColor: Colors.red),
+              content: Text('❌ Failed to lock app'),
+              backgroundColor: Colors.red,
+            ),
           );
         }
       }
@@ -2443,234 +3099,262 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
 
   Widget _buildCallsTab() {
     return Container(
-        color: Theme.of(context).scaffoldBackgroundColor,
-        child: RefreshIndicator(
-          onRefresh: _fetchCallLogs,
-          color: const Color(0xFF58C16D),
-          child: Builder(
-            builder: (context) {
-              if (_isLoadingCallLogs) {
-                return ListView(
-                  physics: const AlwaysScrollableScrollPhysics(),
-                  padding: const EdgeInsets.symmetric(
-                      horizontal: 16.0, vertical: 8.0),
-                  children: const [
-                    SizedBox(height: 40),
-                    Center(
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          CircularProgressIndicator(color: Color(0xFF58C16D)),
-                          SizedBox(height: 12),
-                          Text('Loading call logs...',
-                              style: TextStyle(color: Colors.grey)),
-                        ],
-                      ),
-                    ),
-                    SizedBox(height: 400),
-                  ],
-                );
-              }
-
-              if (_callLogsError != null) {
-                return ListView(
-                  physics: const AlwaysScrollableScrollPhysics(),
-                  padding: const EdgeInsets.symmetric(
-                      horizontal: 16.0, vertical: 8.0),
-                  children: [
-                    const SizedBox(height: 40),
-                    Center(
-                      child: Padding(
-                        padding: const EdgeInsets.all(24.0),
-                        child: Column(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Icon(Icons.phone_missed,
-                                size: 64, color: Colors.grey[400]),
-                            const SizedBox(height: 16),
-                            Text(
-                              _callLogsError!,
-                              textAlign: TextAlign.center,
-                              style: GoogleFonts.poppins(
-                                  fontSize: 12, color: Colors.grey[600]),
-                            ),
-                            const SizedBox(height: 24),
-                            ElevatedButton.icon(
-                              onPressed: _fetchCallLogs,
-                              icon: const Icon(Icons.refresh),
-                              label: const Text('Try Again'),
-                              style: ElevatedButton.styleFrom(
-                                backgroundColor: const Color(0xFF58C16D),
-                                foregroundColor: Colors.white,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
-                    const SizedBox(height: 300),
-                  ],
-                );
-              }
-
-              if (_callLogs.isEmpty) {
-                return ListView(
-                  physics: const AlwaysScrollableScrollPhysics(),
-                  padding: const EdgeInsets.symmetric(
-                      horizontal: 16.0, vertical: 8.0),
-                  children: [
-                    const SizedBox(height: 40),
-                    Center(
-                      child: Padding(
-                        padding: const EdgeInsets.all(24.0),
-                        child: Column(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Icon(Icons.phone,
-                                size: 64, color: Colors.grey[400]),
-                            const SizedBox(height: 16),
-                            Text(
-                              'No call logs found',
-                              style: GoogleFonts.poppins(
-                                  fontSize: 16, color: Colors.grey[600]),
-                              textAlign: TextAlign.center,
-                            ),
-                            const SizedBox(height: 12),
-                            Text(
-                              'Pull down to refresh or tap reload',
-                              style: GoogleFonts.poppins(
-                                  fontSize: 12, color: Colors.grey[500]),
-                            ),
-                            const SizedBox(height: 16),
-                            ElevatedButton.icon(
-                              onPressed: _fetchCallLogs,
-                              icon: const Icon(Icons.refresh),
-                              label: const Text('Reload'),
-                              style: ElevatedButton.styleFrom(
-                                backgroundColor: const Color(0xFF58C16D),
-                                foregroundColor: Colors.white,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
-                    const SizedBox(height: 300),
-                  ],
-                );
-              }
-
-              return ListView.separated(
+      color: Theme.of(context).scaffoldBackgroundColor,
+      child: RefreshIndicator(
+        onRefresh: _fetchCallLogs,
+        color: const Color(0xFF58C16D),
+        child: Builder(
+          builder: (context) {
+            if (_isLoadingCallLogs) {
+              return ListView(
                 physics: const AlwaysScrollableScrollPhysics(),
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0),
-                itemCount: _callLogs.length + 1,
-                separatorBuilder: (context, index) => const Divider(height: 24),
-                itemBuilder: (context, index) {
-                  if (index == 0) {
-                    return Padding(
-                      padding: const EdgeInsets.symmetric(vertical: 8.0),
-                      child: Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                        children: [
-                          Text(
-                            '${_callLogs.length} Calls',
-                            style: GoogleFonts.poppins(
-                              fontSize: 16,
-                              fontWeight: FontWeight.w600,
-                              color: const Color(0xFF1A1A1A),
-                            ),
-                          ),
-                          if (_isLoadingCallLogs)
-                            const SizedBox(
-                              width: 20,
-                              height: 20,
-                              child: CircularProgressIndicator(
-                                strokeWidth: 2,
-                                color: Color(0xFF58C16D),
-                              ),
-                            ),
-                        ],
-                      ),
-                    );
-                  }
-
-                  final call = _callLogs[index - 1];
-                  final iconName =
-                      (call['call_type_icon'] as String?) ?? 'phone';
-                  final iconData = _getCallTypeIconData(iconName);
-                  final callType = call['call_type'] as String? ?? 'Unknown';
-                  final number = call['number'] as String? ?? 'Unknown';
-                  final name = call['name'] as String? ?? 'Unknown';
-                  final duration = call['duration'] is int
-                      ? call['duration'] as int
-                      : int.tryParse('${call['duration']}') ?? 0;
-
-                  DateTime? timestamp;
-                  final ts = call['timestamp'];
-                  if (ts is DateTime) {
-                    timestamp = ts;
-                  } else if (ts is String) {
-                    timestamp = DateTime.tryParse(ts);
-                  }
-
-                  return ListTile(
-                    contentPadding: const EdgeInsets.symmetric(
-                        vertical: 8.0, horizontal: 0.0),
-                    leading: CircleAvatar(
-                      backgroundColor: const Color(0xFFE8E8E8),
-                      child: Icon(iconData, color: const Color(0xFF1A1A1A)),
-                    ),
-                    title: Text(
-                      name,
-                      style: GoogleFonts.poppins(
-                        fontSize: 16,
-                        fontWeight: FontWeight.w600,
-                        color: const Color(0xFF1A1A1A),
-                      ),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                    subtitle: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 16.0,
+                  vertical: 8.0,
+                ),
+                children: const [
+                  SizedBox(height: 40),
+                  Center(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
                       children: [
+                        CircularProgressIndicator(color: Color(0xFF58C16D)),
+                        SizedBox(height: 12),
                         Text(
-                          number,
-                          style: GoogleFonts.poppins(
-                              fontSize: 12, color: Colors.grey[600]),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                        const SizedBox(height: 4),
-                        Row(
-                          children: [
-                            Text(
-                              CallLogsService.formatDuration(duration),
-                              style: GoogleFonts.poppins(
-                                  fontSize: 12, color: Colors.grey[600]),
-                            ),
-                            const SizedBox(width: 8),
-                            Text(
-                              CallLogsService.formatTimestamp(timestamp),
-                              style: GoogleFonts.poppins(
-                                  fontSize: 12, color: Colors.grey[600]),
-                            ),
-                          ],
-                        ),
-                        const SizedBox(height: 4),
-                        Text(
-                          callType,
-                          style: GoogleFonts.poppins(
-                              fontSize: 12, color: Colors.grey[500]),
+                          'Loading call logs...',
+                          style: TextStyle(color: Colors.grey),
                         ),
                       ],
                     ),
-                  );
-                },
+                  ),
+                  SizedBox(height: 400),
+                ],
               );
-            },
-          ),
-        ));
+            }
+
+            if (_callLogsError != null) {
+              return ListView(
+                physics: const AlwaysScrollableScrollPhysics(),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 16.0,
+                  vertical: 8.0,
+                ),
+                children: [
+                  const SizedBox(height: 40),
+                  Center(
+                    child: Padding(
+                      padding: const EdgeInsets.all(24.0),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(
+                            Icons.phone_missed,
+                            size: 64,
+                            color: Colors.grey[400],
+                          ),
+                          const SizedBox(height: 16),
+                          Text(
+                            _callLogsError!,
+                            textAlign: TextAlign.center,
+                            style: GoogleFonts.poppins(
+                              fontSize: 12,
+                              color: Colors.grey[600],
+                            ),
+                          ),
+                          const SizedBox(height: 24),
+                          ElevatedButton.icon(
+                            onPressed: _fetchCallLogs,
+                            icon: const Icon(Icons.refresh),
+                            label: const Text('Try Again'),
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: const Color(0xFF58C16D),
+                              foregroundColor: Colors.white,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 300),
+                ],
+              );
+            }
+
+            if (_callLogs.isEmpty) {
+              return ListView(
+                physics: const AlwaysScrollableScrollPhysics(),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 16.0,
+                  vertical: 8.0,
+                ),
+                children: [
+                  const SizedBox(height: 40),
+                  Center(
+                    child: Padding(
+                      padding: const EdgeInsets.all(24.0),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(Icons.phone, size: 64, color: Colors.grey[400]),
+                          const SizedBox(height: 16),
+                          Text(
+                            'No call logs found',
+                            style: GoogleFonts.poppins(
+                              fontSize: 16,
+                              color: Colors.grey[600],
+                            ),
+                            textAlign: TextAlign.center,
+                          ),
+                          const SizedBox(height: 12),
+                          Text(
+                            'Pull down to refresh or tap reload',
+                            style: GoogleFonts.poppins(
+                              fontSize: 12,
+                              color: Colors.grey[500],
+                            ),
+                          ),
+                          const SizedBox(height: 16),
+                          ElevatedButton.icon(
+                            onPressed: _fetchCallLogs,
+                            icon: const Icon(Icons.refresh),
+                            label: const Text('Reload'),
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: const Color(0xFF58C16D),
+                              foregroundColor: Colors.white,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 300),
+                ],
+              );
+            }
+
+            return ListView.separated(
+              physics: const AlwaysScrollableScrollPhysics(),
+              padding: const EdgeInsets.symmetric(
+                horizontal: 16.0,
+                vertical: 8.0,
+              ),
+              itemCount: _callLogs.length + 1,
+              separatorBuilder: (context, index) => const Divider(height: 24),
+              itemBuilder: (context, index) {
+                if (index == 0) {
+                  return Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 8.0),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Text(
+                          '${_callLogs.length} Calls',
+                          style: GoogleFonts.poppins(
+                            fontSize: 16,
+                            fontWeight: FontWeight.w600,
+                            color: const Color(0xFF1A1A1A),
+                          ),
+                        ),
+                        if (_isLoadingCallLogs)
+                          const SizedBox(
+                            width: 20,
+                            height: 20,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              color: Color(0xFF58C16D),
+                            ),
+                          ),
+                      ],
+                    ),
+                  );
+                }
+
+                final call = _callLogs[index - 1];
+                final iconName = (call['call_type_icon'] as String?) ?? 'phone';
+                final iconData = _getCallTypeIconData(iconName);
+                final callType = call['call_type'] as String? ?? 'Unknown';
+                final number = call['number'] as String? ?? 'Unknown';
+                final name = call['name'] as String? ?? 'Unknown';
+                final duration = call['duration'] is int
+                    ? call['duration'] as int
+                    : int.tryParse('${call['duration']}') ?? 0;
+
+                DateTime? timestamp;
+                final ts = call['timestamp'];
+                if (ts is DateTime) {
+                  timestamp = ts;
+                } else if (ts is String) {
+                  timestamp = DateTime.tryParse(ts);
+                }
+
+                return ListTile(
+                  contentPadding: const EdgeInsets.symmetric(
+                    vertical: 8.0,
+                    horizontal: 0.0,
+                  ),
+                  leading: CircleAvatar(
+                    backgroundColor: const Color(0xFFE8E8E8),
+                    child: Icon(iconData, color: const Color(0xFF1A1A1A)),
+                  ),
+                  title: Text(
+                    name,
+                    style: GoogleFonts.poppins(
+                      fontSize: 16,
+                      fontWeight: FontWeight.w600,
+                      color: const Color(0xFF1A1A1A),
+                    ),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  subtitle: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        number,
+                        style: GoogleFonts.poppins(
+                          fontSize: 12,
+                          color: Colors.grey[600],
+                        ),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      const SizedBox(height: 4),
+                      Row(
+                        children: [
+                          Text(
+                            CallLogsService.formatDuration(duration),
+                            style: GoogleFonts.poppins(
+                              fontSize: 12,
+                              color: Colors.grey[600],
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          Text(
+                            CallLogsService.formatTimestamp(timestamp),
+                            style: GoogleFonts.poppins(
+                              fontSize: 12,
+                              color: Colors.grey[600],
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        callType,
+                        style: GoogleFonts.poppins(
+                          fontSize: 12,
+                          color: Colors.grey[500],
+                        ),
+                      ),
+                    ],
+                  ),
+                );
+              },
+            );
+          },
+        ),
+      ),
+    );
   }
 
   Widget _buildLocationTab() {
@@ -2784,13 +3468,17 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
                                 final lat = _latestLocation!['latitude'];
                                 final lng = _latestLocation!['longitude'];
                                 final url = Uri.parse(
-                                    'https://www.google.com/maps/dir/?api=1&destination=$lat,$lng');
+                                  'https://www.google.com/maps/dir/?api=1&destination=$lat,$lng',
+                                );
                                 if (await canLaunchUrl(url)) {
                                   await launchUrl(url);
                                 }
                               },
-                              icon: const Icon(Icons.navigation,
-                                  color: Colors.white, size: 20),
+                              icon: const Icon(
+                                Icons.navigation,
+                                color: Colors.white,
+                                size: 20,
+                              ),
                               label: Text(
                                 'Get Directions',
                                 style: GoogleFonts.poppins(
@@ -2801,8 +3489,9 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
                               ),
                               style: ElevatedButton.styleFrom(
                                 backgroundColor: const Color(0xFF1A1A1A),
-                                padding:
-                                    const EdgeInsets.symmetric(vertical: 16),
+                                padding: const EdgeInsets.symmetric(
+                                  vertical: 16,
+                                ),
                                 shape: RoundedRectangleBorder(
                                   borderRadius: BorderRadius.circular(12),
                                 ),
@@ -2857,11 +3546,13 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
                             const Divider(height: 32),
                         itemBuilder: (context, index) {
                           final location = _locationHistory[index];
-                          final recordedAt =
-                              DateTime.parse(location['recorded_at']);
+                          final recordedAt = DateTime.parse(
+                            location['recorded_at'],
+                          );
                           final timeAgo = _formatTimeAgo(recordedAt);
-                          final timeStr =
-                              DateFormat('h:mm a').format(recordedAt);
+                          final timeStr = DateFormat(
+                            'h:mm a',
+                          ).format(recordedAt);
                           final address =
                               location['address'] ?? 'Unknown Location';
 
@@ -2887,6 +3578,773 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
 
   Widget _buildPlaceholderTab(String title) {
     return Center(child: Text(title, style: const TextStyle(fontSize: 20)));
+  }
+
+  // ==================== CAMERA RECORDING TAB ====================
+
+  Widget _buildScreenRecordingTab() {
+    return RefreshIndicator(
+      onRefresh: () async {
+        await _fetchRecordingSettings();
+        await _fetchScreenRecordings();
+      },
+      child: SingleChildScrollView(
+        physics: const AlwaysScrollableScrollPhysics(),
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // Recording Control Card
+            Card(
+              elevation: 4,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(16),
+              ),
+              child: Padding(
+                padding: const EdgeInsets.all(16),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        const Icon(Icons.videocam, color: Colors.red, size: 28),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                'Camera Recording',
+                                style: FlutterFlowTheme.of(context)
+                                    .titleMedium
+                                    .override(
+                                      fontFamily: 'Readex Pro',
+                                      fontWeight: FontWeight.bold,
+                                    ),
+                              ),
+                              Text(
+                                'Record 30-second video clips from child\'s device',
+                                style: FlutterFlowTheme.of(context)
+                                    .bodySmall
+                                    .override(
+                                      fontFamily: 'Readex Pro',
+                                      color: Colors.grey,
+                                    ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+
+                    const SizedBox(height: 16),
+
+                    // Start/Stop Recording Button (Toggle)
+                    SizedBox(
+                      width: double.infinity,
+                      child: ElevatedButton.icon(
+                        onPressed: _isLoadingRecordingSettings
+                            ? null
+                            : () {
+                                if (_isCameraRecordingActive) {
+                                  _stopCameraRecording();
+                                } else {
+                                  _requestCameraRecording();
+                                }
+                              },
+                        icon: Icon(
+                          _isCameraRecordingActive
+                              ? Icons.stop
+                              : Icons.videocam,
+                          color: Colors.white,
+                        ),
+                        label: Text(
+                          _isCameraRecordingActive
+                              ? 'Stop Recording'
+                              : 'Start Recording',
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: _isCameraRecordingActive
+                              ? Colors.red
+                              : Colors.green,
+                          padding: const EdgeInsets.symmetric(vertical: 14),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                        ),
+                      ),
+                    ),
+
+                    // Recording indicator
+                    if (_isCameraRecordingActive)
+                      Container(
+                        margin: const EdgeInsets.only(top: 8),
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 12,
+                          vertical: 6,
+                        ),
+                        decoration: BoxDecoration(
+                          color: Colors.red.withOpacity(0.1),
+                          borderRadius: BorderRadius.circular(8),
+                          border:
+                              Border.all(color: Colors.red.withOpacity(0.3)),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Container(
+                              width: 8,
+                              height: 8,
+                              decoration: const BoxDecoration(
+                                color: Colors.red,
+                                shape: BoxShape.circle,
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            const Text(
+                              'Recording in progress...',
+                              style: TextStyle(
+                                color: Colors.red,
+                                fontWeight: FontWeight.w500,
+                                fontSize: 12,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+
+                    const SizedBox(height: 12),
+                    Container(
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: Colors.blue.shade50,
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: Row(
+                        children: [
+                          Icon(
+                            Icons.info_outline,
+                            color: Colors.blue.shade700,
+                            size: 20,
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Text(
+                              'Records a short 30-second video using the child\'s camera. Video is uploaded to Google Drive for viewing.\n\n'
+                              '⚠️ Recording only works when the child\'s device is UNLOCKED. If locked, recording will start automatically when unlocked.',
+                              style: TextStyle(
+                                color: Colors.blue.shade700,
+                                fontSize: 12,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+
+                    // Permission Status
+                    const SizedBox(height: 16),
+                    const Divider(),
+                    const SizedBox(height: 8),
+                    Text(
+                      'Permissions',
+                      style: FlutterFlowTheme.of(context).bodyMedium.override(
+                            fontFamily: 'Readex Pro',
+                            fontWeight: FontWeight.w600,
+                          ),
+                    ),
+                    const SizedBox(height: 8),
+                    _buildPermissionRow(
+                      'Camera & Microphone',
+                      _hasScreenRecordPermission,
+                      () async {
+                        try {
+                          await platform.invokeMethod(
+                            'requestCameraPermission',
+                          );
+                        } catch (e) {
+                          print('Error requesting permission: $e');
+                        }
+                      },
+                    ),
+                    const SizedBox(height: 8),
+                    _buildPermissionRow(
+                      'Google Drive',
+                      _isGoogleDriveConnected,
+                      () async {
+                        try {
+                          await platform.invokeMethod(
+                            'requestGoogleDrivePermission',
+                          );
+                        } catch (e) {
+                          print('Error requesting Drive: $e');
+                        }
+                      },
+                      subtitle: _googleDriveAccount,
+                    ),
+                  ],
+                ),
+              ),
+            ),
+
+            const SizedBox(height: 24),
+
+            // Recordings List Header
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Text(
+                  'Recorded Videos',
+                  style: FlutterFlowTheme.of(context).titleMedium.override(
+                        fontFamily: 'Readex Pro',
+                        fontWeight: FontWeight.bold,
+                      ),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.refresh),
+                  onPressed: () async {
+                    await _fetchScreenRecordings();
+                  },
+                ),
+              ],
+            ),
+
+            const SizedBox(height: 12),
+
+            // Recordings List
+            if (_isLoadingRecordings)
+              const Center(
+                child: Padding(
+                  padding: EdgeInsets.all(32),
+                  child: CircularProgressIndicator(),
+                ),
+              )
+            else if (_screenRecordings.isEmpty)
+              Center(
+                child: Padding(
+                  padding: const EdgeInsets.all(32),
+                  child: Column(
+                    children: [
+                      Icon(
+                        Icons.video_library_outlined,
+                        size: 64,
+                        color: Colors.grey.shade400,
+                      ),
+                      const SizedBox(height: 16),
+                      Text(
+                        'No recordings yet',
+                        style: TextStyle(
+                          color: Colors.grey.shade600,
+                          fontSize: 16,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      Text(
+                        'Enable recording to start capturing screen activity from the child\'s device',
+                        style: TextStyle(
+                          color: Colors.grey.shade500,
+                          fontSize: 14,
+                        ),
+                        textAlign: TextAlign.center,
+                      ),
+                    ],
+                  ),
+                ),
+              )
+            else
+              ListView.builder(
+                shrinkWrap: true,
+                physics: const NeverScrollableScrollPhysics(),
+                itemCount: _screenRecordings.length,
+                itemBuilder: (context, index) {
+                  final recording = _screenRecordings[index];
+                  return _buildRecordingItem(recording);
+                },
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildPermissionRow(
+    String title,
+    bool isGranted,
+    VoidCallback onRequest, {
+    String? subtitle,
+  }) {
+    return Row(
+      children: [
+        Icon(
+          isGranted ? Icons.check_circle : Icons.error_outline,
+          color: isGranted ? Colors.green : Colors.orange,
+          size: 20,
+        ),
+        const SizedBox(width: 8),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(title, style: const TextStyle(fontSize: 14)),
+              if (subtitle != null)
+                Text(
+                  subtitle,
+                  style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
+                ),
+            ],
+          ),
+        ),
+        if (!isGranted)
+          TextButton(
+            onPressed: onRequest,
+            style: TextButton.styleFrom(foregroundColor: Colors.blue),
+            child: const Text('Grant'),
+          ),
+      ],
+    );
+  }
+
+  Widget _buildRecordingItem(Map<String, dynamic> recording) {
+    final fileName = recording['file_name'] ?? 'Unknown';
+    final recordedAt = recording['recorded_at'];
+    final status = recording['status'] ?? 'unknown';
+    final driveLink = recording['drive_link'];
+    final driveFileId = recording['drive_file_id'];
+    final fileSize = recording['file_size'] ?? 0;
+    final durationSeconds = recording['duration_seconds'] ?? 0;
+
+    // Parse date
+    String formattedDate = '';
+    if (recordedAt != null) {
+      try {
+        final date = DateTime.parse(recordedAt);
+        formattedDate =
+            '${date.day}/${date.month}/${date.year} ${date.hour}:${date.minute.toString().padLeft(2, '0')}';
+      } catch (e) {
+        formattedDate = recordedAt.toString();
+      }
+    }
+
+    // Format file size
+    String formattedSize = '';
+    if (fileSize > 0) {
+      if (fileSize > 1024 * 1024) {
+        formattedSize = '${(fileSize / (1024 * 1024)).toStringAsFixed(1)} MB';
+      } else if (fileSize > 1024) {
+        formattedSize = '${(fileSize / 1024).toStringAsFixed(1)} KB';
+      } else {
+        formattedSize = '$fileSize B';
+      }
+    }
+
+    // Format duration
+    String formattedDuration = '';
+    if (durationSeconds > 0) {
+      final minutes = durationSeconds ~/ 60;
+      final seconds = durationSeconds % 60;
+      formattedDuration = '${minutes}m ${seconds}s';
+    }
+
+    return Card(
+      margin: const EdgeInsets.only(bottom: 8),
+      child: InkWell(
+        onTap: driveLink != null && driveLink.toString().isNotEmpty
+            ? () => _showVideoPlayerDialog(driveLink, driveFileId, fileName)
+            : null,
+        child: Padding(
+          padding: const EdgeInsets.all(12),
+          child: Row(
+            children: [
+              // Video thumbnail/icon with play button overlay
+              Stack(
+                alignment: Alignment.center,
+                children: [
+                  Container(
+                    width: 64,
+                    height: 64,
+                    decoration: BoxDecoration(
+                      color: status == 'uploaded'
+                          ? Colors.blue.shade50
+                          : Colors.orange.shade50,
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: Icon(
+                      Icons.videocam,
+                      size: 32,
+                      color: status == 'uploaded' ? Colors.blue : Colors.orange,
+                    ),
+                  ),
+                  if (status == 'uploaded' && driveLink != null)
+                    Container(
+                      width: 32,
+                      height: 32,
+                      decoration: BoxDecoration(
+                        color: Colors.white.withOpacity(0.9),
+                        shape: BoxShape.circle,
+                      ),
+                      child: const Icon(
+                        Icons.play_arrow,
+                        color: Colors.blue,
+                        size: 24,
+                      ),
+                    ),
+                ],
+              ),
+              const SizedBox(width: 12),
+              // Info section
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      fileName,
+                      style: const TextStyle(
+                        fontWeight: FontWeight.w600,
+                        fontSize: 14,
+                      ),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      formattedDate,
+                      style: TextStyle(
+                        color: Colors.grey.shade600,
+                        fontSize: 12,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Row(
+                      children: [
+                        if (formattedDuration.isNotEmpty) ...[
+                          Icon(
+                            Icons.timer,
+                            size: 12,
+                            color: Colors.grey.shade500,
+                          ),
+                          const SizedBox(width: 4),
+                          Text(
+                            formattedDuration,
+                            style: TextStyle(
+                              color: Colors.grey.shade600,
+                              fontSize: 12,
+                            ),
+                          ),
+                          const SizedBox(width: 12),
+                        ],
+                        if (formattedSize.isNotEmpty) ...[
+                          Icon(
+                            Icons.data_usage,
+                            size: 12,
+                            color: Colors.grey.shade500,
+                          ),
+                          const SizedBox(width: 4),
+                          Text(
+                            formattedSize,
+                            style: TextStyle(
+                              color: Colors.grey.shade600,
+                              fontSize: 12,
+                            ),
+                          ),
+                        ],
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+              // Actions
+              Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (status == 'uploaded')
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 8,
+                        vertical: 4,
+                      ),
+                      decoration: BoxDecoration(
+                        color: Colors.green.shade50,
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(
+                            Icons.cloud_done,
+                            size: 12,
+                            color: Colors.green.shade700,
+                          ),
+                          const SizedBox(width: 4),
+                          Text(
+                            'Uploaded',
+                            style: TextStyle(
+                              fontSize: 10,
+                              color: Colors.green.shade700,
+                              fontWeight: FontWeight.w500,
+                            ),
+                          ),
+                        ],
+                      ),
+                    )
+                  else if (status == 'failed')
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 8,
+                        vertical: 4,
+                      ),
+                      decoration: BoxDecoration(
+                        color: Colors.red.shade50,
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(
+                            Icons.error_outline,
+                            size: 12,
+                            color: Colors.red.shade700,
+                          ),
+                          const SizedBox(width: 4),
+                          Text(
+                            'Failed',
+                            style: TextStyle(
+                              fontSize: 10,
+                              color: Colors.red.shade700,
+                              fontWeight: FontWeight.w500,
+                            ),
+                          ),
+                        ],
+                      ),
+                    )
+                  else
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 8,
+                        vertical: 4,
+                      ),
+                      decoration: BoxDecoration(
+                        color: Colors.orange.shade50,
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          SizedBox(
+                            width: 12,
+                            height: 12,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              valueColor: AlwaysStoppedAnimation(
+                                Colors.orange.shade700,
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 4),
+                          Text(
+                            'Pending',
+                            style: TextStyle(
+                              fontSize: 10,
+                              color: Colors.orange.shade700,
+                              fontWeight: FontWeight.w500,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  if (driveLink != null && driveLink.toString().isNotEmpty) ...[
+                    const SizedBox(height: 8),
+                    IconButton(
+                      icon: const Icon(Icons.open_in_new, size: 20),
+                      color: Colors.blue,
+                      padding: EdgeInsets.zero,
+                      constraints: const BoxConstraints(),
+                      onPressed: () => _openDriveLink(driveLink),
+                      tooltip: 'Open in browser',
+                    ),
+                  ],
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _showVideoPlayerDialog(
+    String driveLink,
+    String? driveFileId,
+    String fileName,
+  ) {
+    // Create a preview/embed link for Google Drive video
+    String? previewUrl;
+    if (driveFileId != null && driveFileId.isNotEmpty) {
+      // Google Drive preview URL
+      previewUrl = 'https://drive.google.com/file/d/$driveFileId/preview';
+    }
+
+    showDialog(
+      context: context,
+      builder: (context) => Dialog(
+        insetPadding: const EdgeInsets.all(16),
+        child: Container(
+          constraints: BoxConstraints(
+            maxWidth: MediaQuery.of(context).size.width * 0.95,
+            maxHeight: MediaQuery.of(context).size.height * 0.8,
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              // Header
+              Container(
+                padding: const EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  color: Colors.blue.shade50,
+                  borderRadius: const BorderRadius.vertical(
+                    top: Radius.circular(12),
+                  ),
+                ),
+                child: Row(
+                  children: [
+                    const Icon(Icons.videocam, color: Colors.blue),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        fileName,
+                        style: const TextStyle(
+                          fontWeight: FontWeight.bold,
+                          fontSize: 16,
+                        ),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.close),
+                      onPressed: () => Navigator.of(context).pop(),
+                    ),
+                  ],
+                ),
+              ),
+              // Video content
+              Flexible(
+                child: Container(
+                  color: Colors.black,
+                  child: Center(
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        const Icon(
+                          Icons.play_circle_outline,
+                          size: 80,
+                          color: Colors.white70,
+                        ),
+                        const SizedBox(height: 16),
+                        const Text(
+                          'Tap to play video in browser',
+                          style: TextStyle(color: Colors.white70, fontSize: 16),
+                        ),
+                        const SizedBox(height: 24),
+                        ElevatedButton.icon(
+                          icon: const Icon(Icons.play_arrow),
+                          label: const Text('Play Video'),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: Colors.blue,
+                            foregroundColor: Colors.white,
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 32,
+                              vertical: 16,
+                            ),
+                          ),
+                          onPressed: () {
+                            Navigator.of(context).pop();
+                            _openDriveLink(driveLink);
+                          },
+                        ),
+                        if (previewUrl != null) ...[
+                          const SizedBox(height: 12),
+                          OutlinedButton.icon(
+                            icon: const Icon(Icons.preview),
+                            label: const Text('Preview in Drive'),
+                            style: OutlinedButton.styleFrom(
+                              foregroundColor: Colors.white,
+                              side: const BorderSide(color: Colors.white70),
+                            ),
+                            onPressed: () {
+                              Navigator.of(context).pop();
+                              _openDriveLink(previewUrl!);
+                            },
+                          ),
+                        ],
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+              // Footer with actions
+              Container(
+                padding: const EdgeInsets.all(16),
+                decoration: const BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.vertical(
+                    bottom: Radius.circular(12),
+                  ),
+                ),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                  children: [
+                    TextButton.icon(
+                      icon: const Icon(Icons.open_in_browser),
+                      label: const Text('Open in Browser'),
+                      onPressed: () {
+                        Navigator.of(context).pop();
+                        _openDriveLink(driveLink);
+                      },
+                    ),
+                    TextButton.icon(
+                      icon: const Icon(Icons.share),
+                      label: const Text('Share Link'),
+                      onPressed: () {
+                        Clipboard.setData(ClipboardData(text: driveLink));
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(
+                            content: Text('Link copied to clipboard'),
+                            backgroundColor: Colors.green,
+                          ),
+                        );
+                      },
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _openDriveLink(String link) async {
+    try {
+      final uri = Uri.parse(link);
+      if (await canLaunchUrl(uri)) {
+        await launchUrl(uri, mode: LaunchMode.externalApplication);
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Could not open link'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    } catch (e) {
+      print('Error opening link: $e');
+    }
   }
 
   // ==================== VPN TAB METHODS ====================
@@ -3051,7 +4509,7 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             // Debug info section
-         /*   Container(
+            /*   Container(
               padding: const EdgeInsets.all(12),
               margin: const EdgeInsets.only(bottom: 16),
               decoration: BoxDecoration(
@@ -3140,7 +4598,9 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
     if (widget.deviceId == null || widget.deviceId!.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-            content: Text('Error: No device ID'), backgroundColor: Colors.red),
+          content: Text('Error: No device ID'),
+          backgroundColor: Colors.red,
+        ),
       );
       return;
     }
@@ -3159,7 +4619,9 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
       print('✅ Test entry inserted: $testUrl');
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-            content: Text('Test entry added!'), backgroundColor: Colors.green),
+          content: Text('Test entry added!'),
+          backgroundColor: Colors.green,
+        ),
       );
 
       // Refresh the list
@@ -3340,10 +4802,8 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
         shrinkWrap: true,
         physics: const NeverScrollableScrollPhysics(),
         itemCount: _blockedUrls.length,
-        separatorBuilder: (context, index) => Divider(
-          height: 1,
-          color: Colors.grey[200],
-        ),
+        separatorBuilder: (context, index) =>
+            Divider(height: 1, color: Colors.grey[200]),
         itemBuilder: (context, index) {
           final blockedUrl = _blockedUrls[index];
           final url = blockedUrl['url'] ?? '';
@@ -3363,10 +4823,7 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
             ),
             title: Text(
               url,
-              style: const TextStyle(
-                fontWeight: FontWeight.w500,
-                fontSize: 14,
-              ),
+              style: const TextStyle(fontWeight: FontWeight.w500, fontSize: 14),
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
             ),
@@ -3442,10 +4899,8 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
         shrinkWrap: true,
         physics: const NeverScrollableScrollPhysics(),
         itemCount: _searchHistory.length,
-        separatorBuilder: (context, index) => Divider(
-          height: 1,
-          color: Colors.grey[200],
-        ),
+        separatorBuilder: (context, index) =>
+            Divider(height: 1, color: Colors.grey[200]),
         itemBuilder: (context, index) {
           final historyItem = _searchHistory[index];
           final url = historyItem['url'] ?? '';
@@ -3467,10 +4922,7 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
             ),
             title: Text(
               title,
-              style: const TextStyle(
-                fontWeight: FontWeight.w500,
-                fontSize: 14,
-              ),
+              style: const TextStyle(fontWeight: FontWeight.w500, fontSize: 14),
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
             ),

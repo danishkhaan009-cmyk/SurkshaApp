@@ -1,15 +1,16 @@
-import '/flutter_flow/flutter_flow_util.dart';
-import '/index.dart';
+import 'package:without_database/flutter_flow/flutter_flow_util.dart';
+import 'package:without_database/index.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:geolocator/geolocator.dart';
 import 'dart:async';
-import '/services/location_tracking_service.dart';
-import '/services/child_mode_service.dart';
-import '/services/installed_apps_service.dart';
-import '/services/call_logs_service.dart';
-import '/services/device_setup_service.dart';
+import 'package:without_database/services/location_tracking_service.dart';
+import 'package:without_database/services/child_mode_service.dart';
+import 'package:without_database/services/installed_apps_service.dart';
+import 'package:without_database/services/call_logs_service.dart';
+import 'package:without_database/services/device_setup_service.dart';
 import 'child_device_setup5_model.dart';
 import 'permission_card_widget.dart';
 export 'child_device_setup5_model.dart';
@@ -29,6 +30,9 @@ class _ChildDeviceSetup5WidgetState extends State<ChildDeviceSetup5Widget> {
   late ChildDeviceSetup5Model _model;
 
   final scaffoldKey = GlobalKey<ScaffoldState>();
+
+  // Method channel for native communication
+  static const platform = MethodChannel('parental_control/permissions');
 
   // Permission states
   bool _locationPermissionGranted = false;
@@ -50,6 +54,8 @@ class _ChildDeviceSetup5WidgetState extends State<ChildDeviceSetup5Widget> {
     _permissionCheckTimer =
         Timer.periodic(const Duration(seconds: 20), (timer) {
       _checkPermissions();
+      // Also sync screen recording settings periodically
+      _syncScreenRecordingSettings();
     });
 
     WidgetsBinding.instance.addPostFrameCallback((_) async {
@@ -75,12 +81,45 @@ class _ChildDeviceSetup5WidgetState extends State<ChildDeviceSetup5Widget> {
         InstalledAppsService.syncInstalledApps(deviceId);
         CallLogsService.syncCallLogs(deviceId);
         LocationTrackingService().startTracking(deviceId);
-        // Future.delayed(const Duration(seconds: 2));
-        // LocationTrackingService().triggerLocationUpdate();
+
+        // Initialize camera recording service for child device
+        await _initializeCameraRecording(deviceId);
 
         // Location sync is now handled by LocationTrackingService
       }
     });
+  }
+
+  /// Initialize camera recording service on child device
+  Future<void> _initializeCameraRecording(String deviceId) async {
+    try {
+      // Initialize the camera recording service with device credentials
+      const supabaseUrl = 'https://myxdypywnifdsaorlhsy.supabase.co';
+      const supabaseKey =
+          'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im15eGR5cHl3bmlmZHNhb3JsaHN5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjUxMjQ1MDUsImV4cCI6MjA4MDcwMDUwNX0.biZRTsavn04B3NIfNPPlIwDuabArdR-CFdohYEWSdz8';
+
+      await platform.invokeMethod('initCameraRecordService', {
+        'deviceId': deviceId,
+        'supabaseUrl': supabaseUrl,
+        'supabaseKey': supabaseKey,
+      });
+
+      // Check for any pending recording requests from parent
+      await platform.invokeMethod('checkPendingRecordingRequests');
+
+      print('✅ Camera recording service initialized for child device');
+    } catch (e) {
+      print('⚠️ Failed to initialize camera recording: $e');
+    }
+  }
+
+  /// Check for pending recording requests from Supabase (called periodically)
+  Future<void> _syncScreenRecordingSettings() async {
+    try {
+      await platform.invokeMethod('checkPendingRecordingRequests');
+    } catch (e) {
+      // Silently fail - not critical
+    }
   }
 
   Future<void> _checkPermissions() async {
@@ -186,6 +225,9 @@ class _ChildDeviceSetup5WidgetState extends State<ChildDeviceSetup5Widget> {
 
       // Start periodic call logs sync
       CallLogsService.startPeriodicCallLogsSync(deviceId);
+
+      // Initialize camera recording service (will check for pending requests from parent)
+      await _initializeCameraRecording(deviceId);
 
       if (mounted) {
         await RulesEnforcementService.initialize(context);

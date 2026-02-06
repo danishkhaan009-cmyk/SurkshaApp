@@ -1,4 +1,4 @@
-package com.mycompany.SurakshaApp
+package com.getsurakshaapp
 
 import android.content.Context
 import android.util.Log
@@ -109,7 +109,10 @@ object UrlBlockService {
             // Also try FlutterSharedPreferences
             if (deviceId.isNullOrEmpty()) {
                 val flutterPrefs = context.getSharedPreferences("FlutterSharedPreferences", Context.MODE_PRIVATE)
-                deviceId = flutterPrefs.getString("flutter.device_id", null)
+                deviceId = flutterPrefs.getString("flutter.child_device_id", null)
+                if (deviceId.isNullOrEmpty()) {
+                    deviceId = flutterPrefs.getString("flutter.device_id_backup", null)
+                }
                 Log.d(TAG, "📂 Fallback device ID from FlutterSharedPreferences: $deviceId")
             }
         }
@@ -324,7 +327,10 @@ object UrlBlockService {
 
                 if (deviceId.isNullOrEmpty()) {
                     val flutterPrefs = context.getSharedPreferences("FlutterSharedPreferences", Context.MODE_PRIVATE)
-                    deviceId = flutterPrefs.getString("flutter.device_id", null)
+                    deviceId = flutterPrefs.getString("flutter.child_device_id", null)
+                    if (deviceId.isNullOrEmpty()) {
+                        deviceId = flutterPrefs.getString("flutter.device_id_backup", null)
+                    }
                     Log.d(TAG, "🔑 From FlutterSharedPreferences - Device: $deviceId")
                 }
                 

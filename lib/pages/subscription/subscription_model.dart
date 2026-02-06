@@ -1,4 +1,4 @@
-import '/flutter_flow/flutter_flow_util.dart';
+import 'package:without_database/flutter_flow/flutter_flow_util.dart';
 import 'subscription_widget.dart' show SubscriptionWidget;
 import 'package:flutter/material.dart';
 

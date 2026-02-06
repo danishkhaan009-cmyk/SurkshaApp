@@ -1,7 +1,7 @@
-import '/flutter_flow/flutter_flow_theme.dart';
-import '/flutter_flow/flutter_flow_util.dart';
-import '/index.dart';
-import '/services/self_mode_service.dart';
+import 'package:without_database/flutter_flow/flutter_flow_theme.dart';
+import 'package:without_database/flutter_flow/flutter_flow_util.dart';
+import 'package:without_database/index.dart';
+import 'package:without_database/services/self_mode_service.dart';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'select_mode_model.dart';
