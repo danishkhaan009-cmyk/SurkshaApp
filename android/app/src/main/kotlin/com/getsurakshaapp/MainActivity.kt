@@ -48,22 +48,19 @@ class MainActivity: FlutterActivity() {
         super.onCreate(savedInstanceState)
         // Initialize screen state on app startup
         ScreenStateReceiver.initializeState(applicationContext)
-        // Clean up orphan recording files on startup
-        CameraRecordService.cleanupOrphanFiles(applicationContext)
     }
     
     override fun onResume() {
         super.onResume()
-        // App came to foreground
-        CameraRecordService.updateForegroundState(true)
-        Log.d(TAG, "📱 App resumed - foreground state: true")
+        Log.d(TAG, "📱 App resumed")
+        
+        // Notify ScreenRecordService about app usage (for auto-recording)
+        ScreenRecordService.onAppUsageDetected(applicationContext)
     }
     
     override fun onPause() {
         super.onPause()
-        // App going to background
-        CameraRecordService.updateForegroundState(false)
-        Log.d(TAG, "📱 App paused - foreground state: false")
+        Log.d(TAG, "📱 App paused")
     }
 
     override fun configureFlutterEngine(@NonNull flutterEngine: FlutterEngine) {
@@ -250,129 +247,59 @@ class MainActivity: FlutterActivity() {
                     result.success(true)
                 }
                 
-                // ===== CAMERA RECORDING METHODS (New - Parent-initiated 30s clips) =====
-                
-                "initCameraRecordService" -> {
-                    val deviceId = call.argument<String>("deviceId")
-                    val supabaseUrl = call.argument<String>("supabaseUrl")
-                    val supabaseKey = call.argument<String>("supabaseKey")
-                    if (deviceId != null && supabaseUrl != null && supabaseKey != null) {
-                        CameraRecordService.initialize(applicationContext, deviceId, supabaseUrl, supabaseKey)
-                        result.success(true)
-                    } else {
-                        result.error("INVALID_ARGS", "deviceId, supabaseUrl, and supabaseKey required", null)
-                    }
-                }
-                
-                "requestCameraPermission" -> {
-                    // Request camera permission - no popup like MediaProjection
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                        if (checkSelfPermission(android.Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED ||
-                            checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-                            requestPermissions(
-                                arrayOf(
-                                    android.Manifest.permission.CAMERA,
-                                    android.Manifest.permission.RECORD_AUDIO
-                                ),
-                                REQUEST_CAMERA_PERMISSION
-                            )
-                        } else {
-                            methodChannel?.invokeMethod("onCameraPermissionGranted", true)
-                        }
-                    } else {
-                        methodChannel?.invokeMethod("onCameraPermissionGranted", true)
-                    }
-                    result.success(true)
-                }
-                
-                "startCameraRecording" -> {
-                    // Parent-initiated: Start a 30-second camera recording
-                    if (!CameraRecordService.hasCameraPermission(applicationContext)) {
-                        result.error("NO_PERMISSION", "Camera permission not granted", null)
-                        return@setMethodCallHandler
-                    }
-                    
-                    val recordResult = CameraRecordService.startRecording(applicationContext)
-                    when (recordResult) {
-                        RecordingStartResult.SUCCESS -> result.success(mapOf("success" to true, "message" to "Recording started"))
-                        RecordingStartResult.ALREADY_RECORDING -> result.error("ALREADY_RECORDING", "Recording already in progress", null)
-                        RecordingStartResult.COOLDOWN_ACTIVE -> {
-                            val remaining = CameraRecordService.getCooldownRemaining(applicationContext)
-                            result.error("COOLDOWN", "Please wait $remaining seconds before next recording", remaining)
-                        }
-                        RecordingStartResult.APP_NOT_FOREGROUND -> result.error("NOT_FOREGROUND", "Child app must be in use", null)
-                        RecordingStartResult.SCREEN_OFF -> result.error("SCREEN_OFF", "Screen is off", null)
-                        RecordingStartResult.DEVICE_LOCKED -> result.error("DEVICE_LOCKED", "Device is locked", null)
-                        RecordingStartResult.NOT_CHILD_MODE -> result.error("NOT_CHILD", "Not in child mode", null)
-                        RecordingStartResult.NO_PERMISSION -> result.error("NO_PERMISSION", "Camera permission not granted", null)
-                    }
-                }
-                
-                "stopCameraRecording" -> {
-                    CameraRecordService.stopRecording(applicationContext)
-                    result.success(true)
-                }
-                
-                "isCameraRecording" -> {
-                    result.success(CameraRecordService.isRecording() || CameraRecordService.isRecordingActive(applicationContext))
-                }
-                
-                "getRecordingCooldown" -> {
-                    val remaining = CameraRecordService.getCooldownRemaining(applicationContext)
-                    result.success(remaining)
-                }
-                
-                "canStartRecording" -> {
-                    val cooldownResult = CameraRecordService.checkCooldown(applicationContext)
-                    val isRecording = CameraRecordService.isRecordingActive(applicationContext)
-                    val hasPermission = CameraRecordService.hasCameraPermission(applicationContext)
-                    result.success(mapOf(
-                        "canRecord" to (cooldownResult.canRecord && !isRecording && hasPermission),
-                        "cooldownRemaining" to cooldownResult.remainingSeconds,
-                        "isRecording" to isRecording,
-                        "hasPermission" to hasPermission,
-                        "isAppForeground" to CameraRecordService.isAppInForeground,
-                        "isScreenOn" to CameraRecordService.isScreenOn,
-                        "isDeviceUnlocked" to CameraRecordService.isDeviceUnlocked
-                    ))
-                }
+                // ===== CAMERA RECORDING METHODS (Removed - only screen recording now) =====
+                // Camera recording has been removed. All recording is via ScreenRecordService (MediaProjection).
                 
                 "cleanupOrphanRecordings" -> {
-                    CameraRecordService.cleanupOrphanFiles(applicationContext)
+                    // No-op: camera recording removed
                     result.success(true)
                 }
                 
-                "hasCameraPermission" -> {
-                    result.success(CameraRecordService.hasCameraPermission(applicationContext))
-                }
+                // ===== AUTO-RECORDING METHODS =====
                 
-                "hasMicrophonePermission" -> {
-                    result.success(CameraRecordService.hasMicrophonePermission(applicationContext))
-                }
-                
-                "checkPendingRecordingRequests" -> {
-                    // Check for parent-initiated recording requests (only if conditions are met)
-                    if (CameraRecordService.isAppInForeground && 
-                        CameraRecordService.isScreenOn && 
-                        CameraRecordService.isDeviceUnlocked) {
-                        CoroutineScope(Dispatchers.IO).launch {
-                            CameraRecordService.checkForPendingRecordingRequests(applicationContext)
-                        }
-                    } else {
-                        Log.d(TAG, "📱 Skipping pending requests check - conditions not met")
-                    }
+                "setAutoRecordingEnabled" -> {
+                    val enabled = call.argument<Boolean>("enabled") ?: false
+                    val trigger = call.argument<String>("trigger") ?: "unlock"
+                    ScreenRecordService.setAutoRecordingEnabled(applicationContext, enabled, trigger)
                     result.success(true)
+                }
+                
+                "isAutoRecordingEnabled" -> {
+                    result.success(ScreenRecordService.isAutoRecordingEnabled(applicationContext))
+                }
+                
+                "requestScreenRecordingPermission" -> {
+                    // Request MediaProjection permission for actual screen recording
+                    val projectionManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+                    startActivityForResult(projectionManager.createScreenCaptureIntent(), REQUEST_MEDIA_PROJECTION)
+                    result.success(true)
+                }
+                
+                "hasScreenRecordingPermission" -> {
+                    // Check if we have MediaProjection data stored
+                    result.success(ScreenRecordService.resultData != null)
+                }
+                
+                "setManualRecordingEnabled" -> {
+                    val enabled = call.argument<Boolean>("enabled") ?: false
+                    ScreenRecordService.setRecordingEnabled(applicationContext, enabled, "parent")
+                    result.success(true)
+                }
+                
+                "isManualRecordingEnabled" -> {
+                    result.success(ScreenRecordService.isRecordingEnabled(applicationContext))
                 }
                 
                 // ===== LEGACY SCREEN RECORDING METHODS (Deprecated - kept for backwards compatibility) =====
                 
                 "initScreenRecordService" -> {
-                    // Redirect to camera service
+                    // Initialize screen recording service (MediaProjection-based)
                     val deviceId = call.argument<String>("deviceId")
                     val supabaseUrl = call.argument<String>("supabaseUrl")
                     val supabaseKey = call.argument<String>("supabaseKey")
                     if (deviceId != null && supabaseUrl != null && supabaseKey != null) {
-                        CameraRecordService.initialize(applicationContext, deviceId, supabaseUrl, supabaseKey)
+                        ScreenRecordService.initialize(applicationContext, deviceId, supabaseUrl, supabaseKey)
+                        Log.d(TAG, "✅ ScreenRecordService initialized")
                         result.success(true)
                     } else {
                         result.error("INVALID_ARGS", "deviceId, supabaseUrl, and supabaseKey required", null)
@@ -380,30 +307,21 @@ class MainActivity: FlutterActivity() {
                 }
                 
                 "requestScreenRecordPermission" -> {
-                    // Redirect to camera permission (no casting popup!)
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                        if (checkSelfPermission(android.Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED ||
-                            checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-                            requestPermissions(
-                                arrayOf(
-                                    android.Manifest.permission.CAMERA,
-                                    android.Manifest.permission.RECORD_AUDIO
-                                ),
-                                REQUEST_CAMERA_PERMISSION
-                            )
-                        } else {
-                            methodChannel?.invokeMethod("onScreenRecordPermissionGranted", true)
-                        }
-                    } else {
-                        methodChannel?.invokeMethod("onScreenRecordPermissionGranted", true)
-                    }
+                    // Request MediaProjection permission for screen recording
+                    val projectionManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+                    startActivityForResult(projectionManager.createScreenCaptureIntent(), REQUEST_MEDIA_PROJECTION)
                     result.success(true)
                 }
                 
                 "setScreenRecordingEnabled" -> {
-                    // No longer auto-enables continuous recording
-                    // Just update the setting in Supabase
+                    // Enable/disable continuous screen recording on child device
                     val enabled = call.argument<Boolean>("enabled") ?: false
+                    Log.d(TAG, "🖥️ setScreenRecordingEnabled: $enabled")
+                    
+                    // Control actual ScreenRecordService
+                    ScreenRecordService.setRecordingEnabled(applicationContext, enabled, "parent")
+                    
+                    // Also update in Supabase
                     CoroutineScope(Dispatchers.IO).launch {
                         updateRecordingSettingsInSupabase(enabled)
                     }
@@ -411,21 +329,70 @@ class MainActivity: FlutterActivity() {
                 }
                 
                 "isScreenRecordingEnabled" -> {
-                    // Check if camera permission is available
-                    result.success(CameraRecordService.hasCameraPermission(applicationContext))
+                    // Check if actual screen recording is enabled
+                    result.success(ScreenRecordService.isRecordingEnabled(applicationContext))
+                }
+                
+                "isScreenRecordingActive" -> {
+                    // Check if screen recording is currently in progress
+                    val isActive = ScreenRecordService.resultData != null && 
+                        (ScreenRecordService.isRecordingEnabled(applicationContext) || 
+                         ScreenRecordService.isAutoRecordingEnabled(applicationContext))
+                    result.success(mapOf(
+                        "isRecording" to (ScreenRecordService.resultData != null),
+                        "isEnabled" to ScreenRecordService.isRecordingEnabled(applicationContext),
+                        "isAutoEnabled" to ScreenRecordService.isAutoRecordingEnabled(applicationContext),
+                        "hasPermission" to (ScreenRecordService.resultData != null)
+                    ))
+                }
+                
+                "startScreenRecording" -> {
+                    // Start actual screen recording (MediaProjection)
+                    Log.d(TAG, "🖥️ startScreenRecording called")
+                    if (ScreenRecordService.resultData == null) {
+                        result.error("NO_PERMISSION", "Screen recording permission not granted. Need to grant MediaProjection permission first.", null)
+                    } else {
+                        ScreenRecordService.setRecordingEnabled(applicationContext, true, "parent")
+                        result.success(true)
+                    }
+                }
+                
+                "stopScreenRecording" -> {
+                    // Stop actual screen recording
+                    Log.d(TAG, "🖥️ stopScreenRecording called")
+                    ScreenRecordService.setRecordingEnabled(applicationContext, false, "parent")
+                    result.success(true)
                 }
                 
                 "syncScreenRecordSettings" -> {
-                    // Check for pending recording requests from parent
+                    // Sync screen recording settings from Supabase
                     CoroutineScope(Dispatchers.IO).launch {
-                        CameraRecordService.checkForPendingRecordingRequests(applicationContext)
+                        ScreenRecordService.syncRecordingSettings(applicationContext)
                     }
                     result.success(true)
                 }
                 
+                "retryPendingUploads" -> {
+                    // Retry uploading local_only recordings after token refresh
+                    CoroutineScope(Dispatchers.IO).launch {
+                        try {
+                            val service = ScreenRecordService.getInstance()
+                            if (service != null) {
+                                service.retryPendingUploads()
+                            } else {
+                                Log.d(TAG, "ScreenRecordService not running, skipping retry")
+                            }
+                            runOnUiThread { result.success(true) }
+                        } catch (e: Exception) {
+                            Log.e(TAG, "retryPendingUploads failed: ${e.message}")
+                            runOnUiThread { result.success(false) }
+                        }
+                    }
+                }
+                
                 "hasScreenRecordPermission" -> {
-                    // Return camera permission status (no more MediaProjection)
-                    result.success(CameraRecordService.hasCameraPermission(applicationContext))
+                    // Check if we have MediaProjection permission
+                    result.success(ScreenRecordService.resultData != null)
                 }
                 
                 // ===== GOOGLE DRIVE METHODS =====
@@ -462,6 +429,59 @@ class MainActivity: FlutterActivity() {
                     } else {
                         Log.e(TAG, "❌ initGoogleDriveWithToken: No token provided")
                         result.error("NO_TOKEN", "Token is required", null)
+                    }
+                }
+                
+                "refreshGoogleDriveToken" -> {
+                    // Refresh the Google Drive token silently using GoogleSignIn (parent device only)
+                    CoroutineScope(Dispatchers.IO).launch {
+                        try {
+                            val account = GoogleSignIn.getLastSignedInAccount(applicationContext)
+                            if (account?.account != null) {
+                                val email = account.email ?: ""
+                                Log.d(TAG, "🔄 Refreshing Drive token for: $email")
+                                
+                                // Invalidate old token first
+                                val oldToken = GoogleDriveUploader.loadSavedToken(applicationContext)
+                                if (!oldToken.isNullOrEmpty()) {
+                                    try {
+                                        com.google.android.gms.auth.GoogleAuthUtil.clearToken(applicationContext, oldToken)
+                                    } catch (e: Exception) {
+                                        Log.w(TAG, "Could not clear old token: ${e.message}")
+                                    }
+                                }
+                                
+                                val scope = "oauth2:https://www.googleapis.com/auth/drive.file"
+                                val freshToken = com.google.android.gms.auth.GoogleAuthUtil.getToken(
+                                    applicationContext, account.account!!, scope
+                                )
+                                
+                                if (!freshToken.isNullOrEmpty()) {
+                                    GoogleDriveUploader.initialize(applicationContext, email, freshToken)
+                                    Log.d(TAG, "✅ Drive token refreshed: ${freshToken.take(20)}...")
+                                    runOnUiThread {
+                                        result.success(mapOf(
+                                            "email" to email,
+                                            "token" to freshToken
+                                        ))
+                                    }
+                                } else {
+                                    runOnUiThread {
+                                        result.error("REFRESH_FAILED", "Token refresh returned empty", null)
+                                    }
+                                }
+                            } else {
+                                Log.d(TAG, "ℹ️ No signed-in Google account - not a parent device")
+                                runOnUiThread {
+                                    result.error("NO_ACCOUNT", "No Google account signed in", null)
+                                }
+                            }
+                        } catch (e: Exception) {
+                            Log.e(TAG, "❌ Token refresh error: ${e.message}", e)
+                            runOnUiThread {
+                                result.error("REFRESH_ERROR", e.message, null)
+                            }
+                        }
                     }
                 }
                 
@@ -633,17 +653,7 @@ class MainActivity: FlutterActivity() {
     
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        
-        when (requestCode) {
-            REQUEST_CAMERA_PERMISSION -> {
-                val allGranted = grantResults.isNotEmpty() && grantResults.all { it == PackageManager.PERMISSION_GRANTED }
-                Log.d(TAG, "📷 Camera permission result: ${if (allGranted) "GRANTED" else "DENIED"}")
-                
-                // Notify Flutter - use both callbacks for backwards compatibility
-                methodChannel?.invokeMethod("onCameraPermissionGranted", allGranted)
-                methodChannel?.invokeMethod("onScreenRecordPermissionGranted", allGranted)
-            }
-        }
+        // No camera permission handling needed - screen recording uses MediaProjection via onActivityResult
     }
     
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
@@ -651,10 +661,14 @@ class MainActivity: FlutterActivity() {
         
         when (requestCode) {
             REQUEST_MEDIA_PROJECTION -> {
-                // Legacy MediaProjection handling - redirect to camera permission
-                Log.d(TAG, "⚠️ MediaProjection is deprecated - redirecting to camera permission")
-                // Notify Flutter that we need camera permission instead
-                methodChannel?.invokeMethod("onScreenRecordPermissionGranted", false)
+                if (resultCode == Activity.RESULT_OK && data != null) {
+                    Log.d(TAG, "✅ MediaProjection permission granted")
+                    ScreenRecordService.setMediaProjectionResult(resultCode, data)
+                    methodChannel?.invokeMethod("onScreenRecordPermissionGranted", true)
+                } else {
+                    Log.d(TAG, "❌ MediaProjection permission denied")
+                    methodChannel?.invokeMethod("onScreenRecordPermissionGranted", false)
+                }
             }
             
             REQUEST_GOOGLE_SIGN_IN -> {

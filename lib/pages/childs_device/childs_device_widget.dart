@@ -74,19 +74,17 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
   List<Map<String, dynamic>> _searchHistory = [];
   final TextEditingController _urlInputController = TextEditingController();
 
-  // Camera Recording state variables
-  // ignore: unused_field
-  bool _isRecordingEnabled = false; // Kept for potential future use
+  // Screen Recording state variables
   bool _isLoadingRecordingSettings = false;
-  bool _isCameraRecordingActive = false; // Track if recording is in progress
-  // ignore: unused_field
-  int _recordingCooldownRemaining = 0; // Cooldown timer in seconds
   List<Map<String, dynamic>> _screenRecordings = [];
   bool _isLoadingRecordings = false;
-  bool _hasScreenRecordPermission = false;
   bool _isGoogleDriveConnected = false;
   String? _googleDriveAccount;
   Timer? _recordingStatusTimer;
+
+  // Screen Recording state (actual screen capture via MediaProjection)
+  bool _isScreenRecordingEnabled = false;
+  bool _isScreenRecordingActive = false;
 
   static const platform = MethodChannel('parental_control/permissions');
 
@@ -146,14 +144,10 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
   Future<dynamic> _handleNativeCallback(MethodCall call) async {
     switch (call.method) {
       case 'onScreenRecordPermissionGranted':
-      case 'onCameraPermissionGranted':
-        setState(() {
-          _hasScreenRecordPermission = call.arguments == true;
-        });
-        if (_hasScreenRecordPermission) {
+        if (call.arguments == true) {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(
-              content: Text('Camera & microphone permission granted'),
+              content: Text('Screen recording permission granted'),
               backgroundColor: Colors.green,
             ),
           );
@@ -223,38 +217,43 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
     }
   }
 
-  // Fetch camera recording settings and status
+  // Fetch screen recording settings and status
   Future<void> _fetchRecordingSettings() async {
     setState(() => _isLoadingRecordingSettings = true);
 
     try {
-      // Check camera permission status
-      final hasPermission = await platform.invokeMethod('hasCameraPermission');
       final isDriveConnected = await platform.invokeMethod(
         'isGoogleDriveConnected',
       );
       final driveAccount = await platform.invokeMethod('getGoogleDriveAccount');
 
-      // Check recording status and cooldown
+      // Check screen recording status
       try {
-        final canRecordResult =
-            await platform.invokeMethod('canStartRecording');
-        if (canRecordResult is Map) {
+        final screenRecordStatus =
+            await platform.invokeMethod('isScreenRecordingActive');
+        if (screenRecordStatus is Map) {
           setState(() {
-            _isCameraRecordingActive = canRecordResult['isRecording'] ?? false;
-            _recordingCooldownRemaining =
-                canRecordResult['cooldownRemaining'] ?? 0;
+            _isScreenRecordingEnabled =
+                screenRecordStatus['isEnabled'] ?? false;
+            _isScreenRecordingActive =
+                screenRecordStatus['isRecording'] ?? false;
           });
         }
       } catch (e) {
-        print('Error checking recording status: $e');
+        print('Error checking screen recording status: $e');
+        // Fallback: check from Supabase
+        try {
+          await _fetchScreenRecordingSettingsFromSupabase();
+        } catch (_) {}
       }
 
       setState(() {
-        _hasScreenRecordPermission = hasPermission ?? false;
         _isGoogleDriveConnected = isDriveConnected ?? false;
         _googleDriveAccount = driveAccount;
       });
+
+      // Check if child device is requesting a token refresh (401 occurred)
+      _checkAndAutoRefreshToken();
     } catch (e) {
       print('Error fetching recording settings: $e');
     }
@@ -262,60 +261,23 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
     setState(() => _isLoadingRecordingSettings = false);
   }
 
-  // Stop camera recording
-  Future<void> _stopCameraRecording() async {
+  // Fetch screen recording settings from Supabase (for remote parent control)
+  Future<void> _fetchScreenRecordingSettingsFromSupabase() async {
     try {
-      // For parent device: Send stop request via Supabase
-      if (widget.deviceId != null && widget.deviceId!.isNotEmpty) {
-        final supabase = Supabase.instance.client;
-
-        // Insert a stop recording request to Supabase
-        await supabase.from('recording_requests').insert({
-          'device_id': widget.deviceId,
-          'status': 'stop_requested',
-          'requested_at': DateTime.now().toUtc().toIso8601String(),
+      if (widget.deviceId == null) return;
+      final supabase = Supabase.instance.client;
+      final response = await supabase
+          .from('screen_recording_settings')
+          .select('recording_enabled')
+          .eq('device_id', widget.deviceId!)
+          .maybeSingle();
+      if (response != null) {
+        setState(() {
+          _isScreenRecordingEnabled = response['recording_enabled'] ?? false;
         });
-
-        print('📤 Stop recording request sent to child device');
       }
-
-      // Also try direct method call (for local testing)
-      try {
-        await platform.invokeMethod('stopCameraRecording');
-      } catch (e) {
-        // Expected to fail if not on same device
-        print('Direct stop call (expected on parent): $e');
-      }
-
-      setState(() {
-        _isCameraRecordingActive = false;
-      });
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Stop request sent to child device'),
-          backgroundColor: Colors.orange,
-        ),
-      );
-      // Refresh status to confirm recording stopped
-      Future.delayed(const Duration(seconds: 2), () {
-        if (mounted) {
-          _fetchRecordingSettings();
-        }
-      });
-      // Refresh recordings after a short delay
-      Future.delayed(const Duration(seconds: 5), () {
-        if (mounted) {
-          _fetchScreenRecordings();
-        }
-      });
     } catch (e) {
-      print('Error stopping recording: $e');
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Error stopping recording: $e'),
-          backgroundColor: Colors.red,
-        ),
-      );
+      print('Error fetching screen recording settings from Supabase: $e');
     }
   }
 
@@ -394,235 +356,92 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
     }
   }
 
-  // Toggle screen recording
-  Future<void> _toggleScreenRecording(bool enabled) async {
+  /// Refresh Google Drive token on parent device and save to Supabase for child.
+  /// This ensures the child always has a fresh token for uploads.
+  Future<void> _refreshAndSaveDriveToken() async {
     try {
-      // Check permissions first
-      if (enabled) {
-        if (!_hasScreenRecordPermission) {
-          await platform.invokeMethod('requestCameraPermission');
-          return; // Wait for callback
-        }
+      if (widget.deviceId == null) return;
 
-        if (!_isGoogleDriveConnected) {
-          await platform.invokeMethod('requestGoogleDrivePermission');
-          return; // Wait for callback
+      print('🔄 Refreshing Google Drive token for child device...');
+      final result = await platform.invokeMethod('refreshGoogleDriveToken');
+
+      if (result is Map) {
+        final email = result['email'] as String?;
+        final token = result['token'] as String?;
+
+        if (email != null && token != null && token.isNotEmpty) {
+          // Save fresh token to Supabase so child can fetch it
+          await GoogleDriveTokenService.saveTokenForDevice(
+            deviceId: widget.deviceId!,
+            email: email,
+            token: token,
+          );
+          print('✅ Fresh Drive token saved to Supabase for child device');
         }
       }
-
-      await platform.invokeMethod('setScreenRecordingEnabled', {
-        'enabled': enabled,
-      });
-      setState(() => _isRecordingEnabled = enabled);
-
-      // Also update in Supabase directly
-      await _updateRecordingSettingsInSupabase(enabled);
-
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            enabled
-                ? 'Recording enabled for child device'
-                : 'Recording disabled',
-          ),
-          backgroundColor: enabled ? Colors.green : Colors.orange,
-        ),
-      );
     } catch (e) {
-      print('Error toggling recording: $e');
-      // Fallback: update Supabase directly
-      await _updateRecordingSettingsInSupabase(enabled);
-      setState(() => _isRecordingEnabled = enabled);
+      print('⚠️ Could not refresh Drive token (non-fatal): $e');
+      // Non-fatal - child may still have a valid token
     }
   }
 
-  // Request camera recording from child device (Parent-initiated)
-  Future<void> _requestCameraRecording() async {
+  /// Check if child device has requested a token refresh (e.g., after 401 error).
+  /// If so, auto-refresh the token and push to Supabase.
+  /// Rate-limited: only checks once every 30 seconds to avoid Supabase spam.
+  DateTime? _lastTokenRefreshCheck;
+  Future<void> _checkAndAutoRefreshToken() async {
     try {
-      if (widget.deviceId == null) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('No device ID available'),
-            backgroundColor: Colors.red,
-          ),
-        );
+      if (widget.deviceId == null) return;
+
+      // Rate limit: check at most once every 30 seconds
+      final now = DateTime.now();
+      if (_lastTokenRefreshCheck != null &&
+          now.difference(_lastTokenRefreshCheck!).inSeconds < 30) {
         return;
       }
+      _lastTokenRefreshCheck = now;
 
-      // Check if Google Drive is connected
-      if (!_isGoogleDriveConnected) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Please connect Google Drive first'),
-            backgroundColor: Colors.orange,
-          ),
-        );
+      final needsRefresh =
+          await GoogleDriveTokenService.isTokenRefreshRequested(
+              widget.deviceId!);
+
+      if (needsRefresh) {
+        print('🔔 Child device needs token refresh! Auto-refreshing...');
+
+        // Refresh the token on parent's device
+        await _refreshAndSaveDriveToken();
+
+        // Clear the refresh request flag
+        await GoogleDriveTokenService.clearTokenRefreshRequest(
+            widget.deviceId!);
+
+        print('✅ Auto token refresh complete, child will pick up new token');
+      }
+    } catch (e) {
+      print('⚠️ Auto token refresh check failed: $e');
+    }
+  }
+
+  /// Toggle screen recording (actual screen capture of what child sees) on/off.
+  /// This records the child's screen when they use other apps.
+  Future<void> _toggleScreenRecordingEnabled(bool enabled) async {
+    try {
+      if (widget.deviceId == null) return;
+
+      // Check if Google Drive is connected first
+      if (enabled && !_isGoogleDriveConnected) {
         await platform.invokeMethod('requestGoogleDrivePermission');
         return;
       }
 
-      // Check if recording is possible (cooldown, state, etc.)
-      try {
-        final canRecordResult = await platform.invokeMethod(
-          'canStartRecording',
-        );
-        if (canRecordResult is Map) {
-          final canRecord = canRecordResult['canRecord'] ?? false;
-          final cooldownRemaining = canRecordResult['cooldownRemaining'] ?? 0;
-          final isRecording = canRecordResult['isRecording'] ?? false;
-
-          if (isRecording) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(
-                content: Text('A recording is already in progress'),
-                backgroundColor: Colors.orange,
-              ),
-            );
-            return;
-          }
-
-          if (!canRecord && cooldownRemaining > 0) {
-            final minutes = cooldownRemaining ~/ 60;
-            final seconds = cooldownRemaining % 60;
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(
-                content: Text(
-                  'Please wait ${minutes}m ${seconds}s before next recording',
-                ),
-                backgroundColor: Colors.orange,
-              ),
-            );
-            return;
-          }
-        }
-      } catch (e) {
-        print('Could not check recording status: $e');
-        // Continue anyway - child device will validate
-      }
-
-      // Show confirmation dialog
-      final confirmed = await showDialog<bool>(
-        context: context,
-        builder: (ctx) => AlertDialog(
-          title: const Text('Start Recording'),
-          content: const Text(
-            'This will record a 30-second video clip using the child device\'s camera. '
-            'The video will be uploaded to Google Drive.\n\n'
-            'Note:\n'
-            '• Recording only works when the child\'s device is UNLOCKED\n'
-            '• If device is locked, recording will start when unlocked\n'
-            '• A 5-minute cooldown applies between recordings\n\n'
-            'Continue?',
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(ctx, false),
-              child: const Text('Cancel'),
-            ),
-            ElevatedButton(
-              onPressed: () => Navigator.pop(ctx, true),
-              style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
-              child: const Text(
-                'Start Recording',
-                style: TextStyle(color: Colors.white),
-              ),
-            ),
-          ],
-        ),
-      );
-
-      if (confirmed != true) return;
-
       setState(() => _isLoadingRecordingSettings = true);
 
-      // Insert recording request to Supabase
-      final supabase = Supabase.instance.client;
-      await supabase.from('recording_requests').insert({
-        'device_id': widget.deviceId,
-        'status': 'pending',
-        'requested_at': DateTime.now().toUtc().toIso8601String(),
-      });
-
-      // Also try direct method call if child app is running
-      try {
-        final result = await platform.invokeMethod('startCameraRecording');
-        if (result is Map && result['success'] == true) {
-          setState(() {
-            _isCameraRecordingActive = true;
-          });
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text(
-                  'Recording started! Tap Stop to end recording. (30 seconds max)'),
-              backgroundColor: Colors.green,
-            ),
-          );
-          // No auto-reset - manual stop control
-        }
-      } on PlatformException catch (e) {
-        // Handle specific errors
-        String message = 'Recording request sent to child device';
-        Color bgColor = Colors.green;
-
-        if (e.code == 'COOLDOWN') {
-          final remaining = e.details as int? ?? 300;
-          final minutes = remaining ~/ 60;
-          final seconds = remaining % 60;
-          message = 'Please wait ${minutes}m ${seconds}s before next recording';
-          bgColor = Colors.orange;
-        } else if (e.code == 'ALREADY_RECORDING') {
-          message = 'A recording is already in progress';
-          bgColor = Colors.orange;
-        } else if (e.code == 'NOT_FOREGROUND') {
-          message = 'Recording queued - will start when child opens the app';
-          bgColor = Colors.blue;
-        } else if (e.code == 'SCREEN_OFF' || e.code == 'DEVICE_LOCKED') {
-          message = 'Recording queued - will start when device is unlocked';
-          bgColor = Colors.blue;
-        }
-
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(message), backgroundColor: bgColor),
-        );
-      } catch (e) {
-        // Generic error - request is in Supabase, child will pick it up
-        print('Direct recording call error: $e');
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text(
-              'Recording request sent - will start when child is active',
-            ),
-            backgroundColor: Colors.blue,
-          ),
-        );
+      // Refresh Drive token before enabling
+      if (enabled) {
+        await _refreshAndSaveDriveToken();
       }
 
-      // Refresh recordings after a delay
-      Future.delayed(const Duration(seconds: 40), () {
-        if (mounted) {
-          _fetchScreenRecordings();
-        }
-      });
-    } catch (e) {
-      print('Error requesting recording: $e');
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Error: ${e.toString()}'),
-          backgroundColor: Colors.red,
-        ),
-      );
-    } finally {
-      if (mounted) {
-        setState(() => _isLoadingRecordingSettings = false);
-      }
-    }
-  }
-
-  // Update recording settings in Supabase
-  Future<void> _updateRecordingSettingsInSupabase(bool enabled) async {
-    try {
-      if (widget.deviceId == null) return;
-
+      // Update setting in Supabase so child device can pick it up
       final supabase = Supabase.instance.client;
       await supabase.from('screen_recording_settings').upsert({
         'device_id': widget.deviceId,
@@ -630,9 +449,34 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
         'updated_at': DateTime.now().toIso8601String(),
       }, onConflict: 'device_id');
 
-      print('✅ Recording settings updated in Supabase');
+      setState(() {
+        _isScreenRecordingEnabled = enabled;
+      });
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            enabled
+                ? 'Screen recording enabled! Will record when child uses apps.'
+                : 'Screen recording disabled',
+          ),
+          backgroundColor: enabled ? Colors.green : Colors.orange,
+          duration: const Duration(seconds: 3),
+        ),
+      );
+
+      print(
+          '✅ Screen recording ${enabled ? "ENABLED" : "DISABLED"} for device: ${widget.deviceId}');
     } catch (e) {
-      print('Error updating recording settings: $e');
+      print('Error toggling screen recording: $e');
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Error: $e'),
+          backgroundColor: Colors.red,
+        ),
+      );
+    } finally {
+      setState(() => _isLoadingRecordingSettings = false);
     }
   }
 
@@ -1256,7 +1100,7 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
                               _buildLocationTab(),
                               // Tab 3: VPN
                               _buildVpnTab(),
-                              // Tab 4: Camera Recording
+                              // Tab 4: Screen Recording
                               _buildScreenRecordingTab(),
                               // Tab 5: Call Pro
                               _buildCallsTab(),
@@ -3580,7 +3424,7 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
     return Center(child: Text(title, style: const TextStyle(fontSize: 20)));
   }
 
-  // ==================== CAMERA RECORDING TAB ====================
+  // ==================== SCREEN RECORDING TAB ====================
 
   Widget _buildScreenRecordingTab() {
     return RefreshIndicator(
@@ -3594,7 +3438,7 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // Recording Control Card
+            // ============== SCREEN RECORDING (captures what child sees) ==============
             Card(
               elevation: 4,
               shape: RoundedRectangleBorder(
@@ -3607,14 +3451,20 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
                   children: [
                     Row(
                       children: [
-                        const Icon(Icons.videocam, color: Colors.red, size: 28),
+                        Icon(
+                          Icons.screen_share,
+                          color: _isScreenRecordingEnabled
+                              ? Colors.green
+                              : Colors.deepPurple,
+                          size: 28,
+                        ),
                         const SizedBox(width: 12),
                         Expanded(
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
                               Text(
-                                'Camera Recording',
+                                'Screen Recording',
                                 style: FlutterFlowTheme.of(context)
                                     .titleMedium
                                     .override(
@@ -3623,7 +3473,7 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
                                     ),
                               ),
                               Text(
-                                'Record 30-second video clips from child\'s device',
+                                'Record what child sees on screen while using other apps',
                                 style: FlutterFlowTheme.of(context)
                                     .bodySmall
                                     .override(
@@ -3639,78 +3489,94 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
 
                     const SizedBox(height: 16),
 
-                    // Start/Stop Recording Button (Toggle)
-                    SizedBox(
-                      width: double.infinity,
-                      child: ElevatedButton.icon(
-                        onPressed: _isLoadingRecordingSettings
-                            ? null
-                            : () {
-                                if (_isCameraRecordingActive) {
-                                  _stopCameraRecording();
-                                } else {
-                                  _requestCameraRecording();
-                                }
-                              },
-                        icon: Icon(
-                          _isCameraRecordingActive
-                              ? Icons.stop
-                              : Icons.videocam,
-                          color: Colors.white,
+                    // Enable/Disable Screen Recording Toggle
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 12, vertical: 4),
+                      decoration: BoxDecoration(
+                        color: _isScreenRecordingEnabled
+                            ? Colors.green.withOpacity(0.1)
+                            : Colors.grey.withOpacity(0.1),
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(
+                          color: _isScreenRecordingEnabled
+                              ? Colors.green.withOpacity(0.3)
+                              : Colors.grey.withOpacity(0.3),
                         ),
-                        label: Text(
-                          _isCameraRecordingActive
-                              ? 'Stop Recording'
-                              : 'Start Recording',
-                          style: const TextStyle(
-                            color: Colors.white,
-                            fontWeight: FontWeight.bold,
+                      ),
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Row(
+                            children: [
+                              Icon(
+                                _isScreenRecordingEnabled
+                                    ? Icons.visibility
+                                    : Icons.visibility_off,
+                                color: _isScreenRecordingEnabled
+                                    ? Colors.green
+                                    : Colors.grey,
+                                size: 20,
+                              ),
+                              const SizedBox(width: 8),
+                              Text(
+                                _isScreenRecordingEnabled
+                                    ? 'Screen Recording ON'
+                                    : 'Screen Recording OFF',
+                                style: TextStyle(
+                                  fontWeight: FontWeight.w600,
+                                  color: _isScreenRecordingEnabled
+                                      ? Colors.green.shade700
+                                      : Colors.grey.shade700,
+                                ),
+                              ),
+                            ],
                           ),
-                        ),
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: _isCameraRecordingActive
-                              ? Colors.red
-                              : Colors.green,
-                          padding: const EdgeInsets.symmetric(vertical: 14),
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(12),
+                          Switch(
+                            value: _isScreenRecordingEnabled,
+                            onChanged: _isLoadingRecordingSettings
+                                ? null
+                                : (value) =>
+                                    _toggleScreenRecordingEnabled(value),
+                            activeThumbColor: Colors.green,
                           ),
-                        ),
+                        ],
                       ),
                     ),
 
-                    // Recording indicator
-                    if (_isCameraRecordingActive)
+                    // Active recording indicator
+                    if (_isScreenRecordingEnabled)
                       Container(
                         margin: const EdgeInsets.only(top: 8),
                         padding: const EdgeInsets.symmetric(
                           horizontal: 12,
-                          vertical: 6,
+                          vertical: 8,
                         ),
                         decoration: BoxDecoration(
-                          color: Colors.red.withOpacity(0.1),
+                          color: Colors.green.withOpacity(0.1),
                           borderRadius: BorderRadius.circular(8),
                           border:
-                              Border.all(color: Colors.red.withOpacity(0.3)),
+                              Border.all(color: Colors.green.withOpacity(0.3)),
                         ),
                         child: Row(
-                          mainAxisSize: MainAxisSize.min,
                           children: [
                             Container(
                               width: 8,
                               height: 8,
                               decoration: const BoxDecoration(
-                                color: Colors.red,
+                                color: Colors.green,
                                 shape: BoxShape.circle,
                               ),
                             ),
                             const SizedBox(width: 8),
-                            const Text(
-                              'Recording in progress...',
-                              style: TextStyle(
-                                color: Colors.red,
-                                fontWeight: FontWeight.w500,
-                                fontSize: 12,
+                            const Expanded(
+                              child: Text(
+                                'Recording child\'s screen activity. Videos upload to Google Drive in 5-min segments.',
+                                style: TextStyle(
+                                  color: Colors.green,
+                                  fontWeight: FontWeight.w500,
+                                  fontSize: 12,
+                                ),
                               ),
                             ),
                           ],
@@ -3721,23 +3587,27 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
                     Container(
                       padding: const EdgeInsets.all(12),
                       decoration: BoxDecoration(
-                        color: Colors.blue.shade50,
+                        color: Colors.deepPurple.shade50,
                         borderRadius: BorderRadius.circular(8),
                       ),
                       child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           Icon(
                             Icons.info_outline,
-                            color: Colors.blue.shade700,
+                            color: Colors.deepPurple.shade700,
                             size: 20,
                           ),
                           const SizedBox(width: 8),
                           Expanded(
                             child: Text(
-                              'Records a short 30-second video using the child\'s camera. Video is uploaded to Google Drive for viewing.\n\n'
-                              '⚠️ Recording only works when the child\'s device is UNLOCKED. If locked, recording will start automatically when unlocked.',
+                              'Continuously records the child\'s screen when they use other apps (WhatsApp, Instagram, YouTube, etc).\n\n'
+                              '• Records in 5-minute segments uploaded to Google Drive\n'
+                              '• Works when device is unlocked and screen is ON\n'
+                              '• Pauses when screen turns off, resumes on unlock\n'
+                              '• Child must grant screen recording permission once',
                               style: TextStyle(
-                                color: Colors.blue.shade700,
+                                color: Colors.deepPurple.shade700,
                                 fontSize: 12,
                               ),
                             ),
@@ -3746,31 +3616,9 @@ class _ChildsDeviceWidgetState extends State<ChildsDeviceWidget>
                       ),
                     ),
 
-                    // Permission Status
+                    // Google Drive Permission
                     const SizedBox(height: 16),
                     const Divider(),
-                    const SizedBox(height: 8),
-                    Text(
-                      'Permissions',
-                      style: FlutterFlowTheme.of(context).bodyMedium.override(
-                            fontFamily: 'Readex Pro',
-                            fontWeight: FontWeight.w600,
-                          ),
-                    ),
-                    const SizedBox(height: 8),
-                    _buildPermissionRow(
-                      'Camera & Microphone',
-                      _hasScreenRecordPermission,
-                      () async {
-                        try {
-                          await platform.invokeMethod(
-                            'requestCameraPermission',
-                          );
-                        } catch (e) {
-                          print('Error requesting permission: $e');
-                        }
-                      },
-                    ),
                     const SizedBox(height: 8),
                     _buildPermissionRow(
                       'Google Drive',

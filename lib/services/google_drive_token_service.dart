@@ -113,4 +113,49 @@ class GoogleDriveTokenService {
       return false;
     }
   }
+
+  /// Check if the child device has requested a token refresh.
+  /// Called by parent device when viewing child.
+  /// Gracefully returns false if the column doesn't exist yet.
+  static Future<bool> isTokenRefreshRequested(String deviceId) async {
+    try {
+      // Use a broad select to avoid errors if column doesn't exist
+      final response = await supabase
+          .from('devices')
+          .select()
+          .eq('id', deviceId)
+          .maybeSingle();
+
+      if (response == null) return false;
+
+      // Column may not exist yet — safely check
+      if (!response.containsKey('token_refresh_requested')) return false;
+
+      final requested = response['token_refresh_requested'] as bool? ?? false;
+      if (requested) {
+        final requestedAt = response['token_refresh_requested_at'] as String?;
+        print(
+            '🔔 Child device $deviceId requested token refresh at: $requestedAt');
+      }
+      return requested;
+    } catch (e) {
+      // Silently ignore — column may not exist in database yet
+      return false;
+    }
+  }
+
+  /// Clear the token refresh request flag after parent has refreshed.
+  /// Called by parent after successfully refreshing and saving a new token.
+  /// Silently ignores errors if the column doesn't exist yet.
+  static Future<void> clearTokenRefreshRequest(String deviceId) async {
+    try {
+      await supabase.from('devices').update({
+        'token_refresh_requested': false,
+        'token_refresh_requested_at': null,
+      }).eq('id', deviceId);
+      print('✅ Token refresh request cleared for device: $deviceId');
+    } catch (e) {
+      // Silently ignore — column may not exist in database yet
+    }
+  }
 }
