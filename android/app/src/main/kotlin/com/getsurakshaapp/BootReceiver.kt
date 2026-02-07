@@ -34,6 +34,18 @@ class BootReceiver : BroadcastReceiver() {
                 } catch (e: Exception) {
                     Log.e(TAG, "Failed to start monitoring service: ${e.message}")
                 }
+                
+                // Restart screen recording service if auto-recording was enabled
+                try {
+                    if (ScreenRecordService.isAutoRecordingEnabled(context) || 
+                        ScreenRecordService.isRecordingEnabled(context)) {
+                        Log.d(TAG, "Screen recording was enabled - will resume when user grants permission")
+                        // Note: MediaProjection requires user interaction, so recording
+                        // will resume when the app is opened and permission is re-granted
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed to check screen recording state: ${e.message}")
+                }
             }
         }
     }

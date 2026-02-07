@@ -73,8 +73,8 @@ class CameraRecordService : Service() {
         // Maximum recording duration: 30 seconds
         private const val MAX_RECORDING_DURATION_MS = 30 * 1000L
         
-        // Cooldown between recordings: 5 minutes
-        private const val RECORDING_COOLDOWN_MS = 5 * 60 * 1000L
+        // Cooldown between recordings: 45 seconds
+        private const val RECORDING_COOLDOWN_MS = 45 * 1000L
         
         private var instance: CameraRecordService? = null
         
@@ -126,12 +126,22 @@ class CameraRecordService : Service() {
          * Returns: RecordingStartResult indicating success or failure reason
          */
         fun startRecording(context: Context): RecordingStartResult {
-            Log.d(TAG, "🎬 startRecording called")
+            Log.d(TAG, "🎬 startRecording called (foreground=$isAppInForeground screen=$isScreenOn unlocked=$isDeviceUnlocked)")
             
             // Only record on child devices
             if (!isChildModeActive(context)) {
                 Log.d(TAG, "📱 Not in child mode - skipping recording")
                 return RecordingStartResult.NOT_CHILD_MODE
+            }
+            
+            // Auto-reset stuck recording state (if recording was active for > 2 minutes, it's stuck)
+            if (isRecordingActive(context) && instance?.isRecording != true) {
+                val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                val lastRecTime = prefs.getLong(KEY_LAST_RECORDING_TIME, 0)
+                if (lastRecTime > 0 && System.currentTimeMillis() - lastRecTime > 120_000) {
+                    Log.w(TAG, "⚠️ Recording state was stuck - auto-resetting")
+                    setRecordingActive(context, false)
+                }
             }
             
             // Check if already recording (persistent state)
@@ -147,11 +157,8 @@ class CameraRecordService : Service() {
                 return RecordingStartResult.COOLDOWN_ACTIVE
             }
             
-            // Check if app is in foreground (child must be using the app)
-            if (!isAppInForeground) {
-                Log.d(TAG, "📱 App not in foreground - skipping recording")
-                return RecordingStartResult.APP_NOT_FOREGROUND
-            }
+            // NOTE: Removed isAppInForeground check - recording must work even when child
+            // is using other apps (background recording is the whole point of parental control)
             
             // Check screen state - only record if screen is on and device is unlocked
             if (!isScreenOn) {
@@ -419,11 +426,8 @@ class CameraRecordService : Service() {
                     if (jsonArray.length() > 0) {
                         Log.d(TAG, "📹 Found ${jsonArray.length()} pending recording request(s)")
                         
-                        // Validate conditions before starting recording
-                        if (!isAppInForeground) {
-                            Log.d(TAG, "📱 App not in foreground - postponing recording request")
-                            return
-                        }
+                        // Only check screen/unlock state - foreground NOT required
+                        // Camera recording must work even when child uses other apps
                         if (!isScreenOn) {
                             Log.d(TAG, "📱 Screen is off - postponing recording request")
                             return
@@ -567,9 +571,16 @@ class CameraRecordService : Service() {
     
     // Recording state
     private var isRecording = false
+    private var isStopping = false  // Guard against re-entry during teardown
     private var outputFile: File? = null
     private var recordingStartTime: Long = 0
     private var stopRecordingJob: Job? = null
+    private var captureFailureCount = 0
+    private var selectedCameraId: String? = null
+    private var selectedVideoWidth = 640
+    private var selectedVideoHeight = 480
+    private var retryCount = 0
+    private val MAX_RETRIES = 2
     
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     
@@ -582,6 +593,18 @@ class CameraRecordService : Service() {
         // Pre-load Google Drive token
         GoogleDriveUploader.loadSavedToken(applicationContext)
         Log.d(TAG, "📱 CameraRecordService created, Drive token loaded: ${GoogleDriveUploader.isInitialized(applicationContext)}")
+        
+        // Try silent token refresh if no token available
+        if (!GoogleDriveUploader.isInitialized(applicationContext)) {
+            scope.launch {
+                Log.d(TAG, "🔄 Attempting Drive token refresh on service start...")
+                val refreshed = GoogleDriveUploader.refreshTokenSilently(applicationContext)
+                if (!refreshed) {
+                    Log.d(TAG, "🔄 GoogleSignIn refresh failed, trying Supabase...")
+                    GoogleDriveUploader.refreshTokenFromSupabase(applicationContext)
+                }
+            }
+        }
     }
     
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -629,11 +652,19 @@ class CameraRecordService : Service() {
             return
         }
         
-        // Add a small delay before accessing camera to let Flutter surface stabilize
-        // This helps prevent "Can't acquire next buffer" errors
+        // Reset retry count for fresh recording attempt
+        retryCount = 0
+        selectedVideoWidth = 640
+        selectedVideoHeight = 480
+        
+        // Ensure any previous resources are fully cleaned up
+        Log.d(TAG, "🧹 Ensuring clean state before recording...")
+        cleanup()
+        
+        // Add delay to ensure cleanup completes and camera is released
         backgroundHandler?.postDelayed({
             startCameraRecordingInternal()
-        }, 200)
+        }, 500)  // Increased delay to 500ms for better cleanup
     }
 
     private fun startCameraRecordingInternal() {
@@ -647,10 +678,35 @@ class CameraRecordService : Service() {
                 return
             }
             
+            selectedCameraId = cameraId
+            captureFailureCount = 0
+            
+            // Query supported video sizes from camera
+            val characteristics = cameraManager.getCameraCharacteristics(cameraId)
+            val streamConfigMap = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+            
+            if (streamConfigMap != null) {
+                // Get sizes supported for MediaRecorder
+                val supportedSizes = streamConfigMap.getOutputSizes(MediaRecorder::class.java)
+                if (supportedSizes != null && supportedSizes.isNotEmpty()) {
+                    Log.d(TAG, "📷 Supported video sizes: ${supportedSizes.map { "${it.width}x${it.height}" }}")
+                    
+                    // Pick the best compatible size (prefer ~480p for small file size)
+                    val targetSize = chooseBestVideoSize(supportedSizes)
+                    selectedVideoWidth = targetSize.width
+                    selectedVideoHeight = targetSize.height
+                    Log.d(TAG, "📷 Selected video size: ${selectedVideoWidth}x${selectedVideoHeight}")
+                } else {
+                    Log.w(TAG, "⚠️ No supported sizes for MediaRecorder, using default 640x480")
+                }
+            } else {
+                Log.w(TAG, "⚠️ No stream config map, using default 640x480")
+            }
+            
             // Create output file
             outputFile = createOutputFile()
             
-            // Setup MediaRecorder
+            // Setup MediaRecorder with supported size
             setupMediaRecorder()
             
             // Open camera
@@ -661,6 +717,40 @@ class CameraRecordService : Service() {
             cleanup()
             stopSelf()
         }
+    }
+    
+    /**
+     * Choose the best video size from supported sizes.
+     * Prefers sizes around 480p for small file size and good compatibility.
+     */
+    private fun chooseBestVideoSize(supportedSizes: Array<Size>): Size {
+        // Priority list of preferred sizes
+        val preferredSizes = listOf(
+            Size(640, 480),   // VGA
+            Size(480, 640),   // VGA portrait
+            Size(720, 480),   // DVD quality
+            Size(480, 720),   // DVD portrait
+            Size(352, 288),   // CIF
+            Size(320, 240),   // QVGA
+            Size(176, 144),   // QCIF
+        )
+        
+        // First try exact match with preferred sizes
+        for (preferred in preferredSizes) {
+            if (supportedSizes.any { it.width == preferred.width && it.height == preferred.height }) {
+                return preferred
+            }
+        }
+        
+        // Find the smallest size that's at least 320x240
+        val minSize = supportedSizes
+            .filter { it.width >= 320 && it.height >= 240 }
+            .minByOrNull { it.width.toLong() * it.height.toLong() }
+        
+        if (minSize != null) return minSize
+        
+        // If nothing >= 320x240, pick the largest available (some devices have only small sizes)
+        return supportedSizes.maxByOrNull { it.width.toLong() * it.height.toLong() } ?: Size(640, 480)
     }
     
     private fun getCameraId(cameraManager: CameraManager): String? {
@@ -699,10 +789,16 @@ class CameraRecordService : Service() {
         val hasAudioPermission = ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == 
             PackageManager.PERMISSION_GRANTED
         
+        Log.d(TAG, "Setting up MediaRecorder: ${selectedVideoWidth}x${selectedVideoHeight}, audio=$hasAudioPermission")
+        
         mediaRecorder?.apply {
             // IMPORTANT: Order matters! Audio source must be set before video source
             if (hasAudioPermission) {
-                setAudioSource(MediaRecorder.AudioSource.MIC)
+                try {
+                    setAudioSource(MediaRecorder.AudioSource.MIC)
+                } catch (e: Exception) {
+                    Log.w(TAG, "⚠️ Failed to set audio source: ${e.message} - recording without audio")
+                }
             }
             setVideoSource(MediaRecorder.VideoSource.SURFACE)
             setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
@@ -710,14 +806,17 @@ class CameraRecordService : Service() {
             // Set encoders AFTER format
             setVideoEncoder(MediaRecorder.VideoEncoder.H264)
             if (hasAudioPermission) {
-                setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
-                setAudioEncodingBitRate(32000)  // Low audio bitrate
-                setAudioSamplingRate(22050)      // Lower sample rate
+                try {
+                    setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
+                    setAudioEncodingBitRate(32000)  // Low audio bitrate
+                    setAudioSamplingRate(22050)      // Lower sample rate
+                } catch (e: Exception) {
+                    Log.w(TAG, "⚠️ Failed to set audio encoder: ${e.message}")
+                }
             }
             
-            // Use VGA resolution (640x480) for better compatibility
-            // Some devices have issues with very low resolutions
-            setVideoSize(640, 480)              // VGA resolution - good compatibility
+            // Use camera-supported resolution (queried from camera characteristics)
+            setVideoSize(selectedVideoWidth, selectedVideoHeight)
             setVideoFrameRate(15)               // 15fps - smooth enough for viewing
             setVideoEncodingBitRate(200000)     // 200 Kbps = ~750KB for 30 seconds
             setOutputFile(outputFile?.absolutePath)
@@ -732,12 +831,33 @@ class CameraRecordService : Service() {
             
             setOnErrorListener { _, what, extra ->
                 Log.e(TAG, "❌ MediaRecorder error: what=$what, extra=$extra")
+                // Handle server died error (common on some devices)
+                if (what == MediaRecorder.MEDIA_ERROR_SERVER_DIED || extra == -1007) {
+                    Log.e(TAG, "💥 MediaRecorder server died - will retry with fallback")
+                    scope.launch(Dispatchers.Main) {
+                        cleanup()
+                        // Retry with a smaller/different size
+                        if (retryCount < MAX_RETRIES) {
+                            retryCount++
+                            Log.d(TAG, "🔄 Retry attempt $retryCount/$MAX_RETRIES")
+                            // Use smaller resolution on retry
+                            selectedVideoWidth = 320
+                            selectedVideoHeight = 240
+                            backgroundHandler?.postDelayed({
+                                startCameraRecordingInternal()
+                            }, 1000)
+                        } else {
+                            Log.e(TAG, "❌ Max retries reached - giving up")
+                            stopSelf()
+                        }
+                    }
+                }
             }
             
             prepare()
         }
         
-        Log.d(TAG, "✅ MediaRecorder prepared (640x480, 15fps, 200kbps)")
+        Log.d(TAG, "✅ MediaRecorder prepared (${selectedVideoWidth}x${selectedVideoHeight}, 15fps, 200kbps)")
     }
     
     private fun openCamera(cameraManager: CameraManager, cameraId: String) {
@@ -762,9 +882,18 @@ class CameraRecordService : Service() {
                 }
                 
                 override fun onError(camera: CameraDevice, error: Int) {
-                    Log.e(TAG, "❌ Camera error: $error")
+                    val errorMsg = when (error) {
+                        CameraDevice.StateCallback.ERROR_CAMERA_IN_USE -> "Camera in use"
+                        CameraDevice.StateCallback.ERROR_MAX_CAMERAS_IN_USE -> "Max cameras in use"
+                        CameraDevice.StateCallback.ERROR_CAMERA_DISABLED -> "Camera disabled"
+                        CameraDevice.StateCallback.ERROR_CAMERA_DEVICE -> "Camera device error"
+                        CameraDevice.StateCallback.ERROR_CAMERA_SERVICE -> "Camera service error"
+                        else -> "Unknown error"
+                    }
+                    Log.e(TAG, "❌ Camera error: $error ($errorMsg)")
                     camera.close()
                     cameraDevice = null
+                    cleanup()
                     stopSelf()
                 }
             }, backgroundHandler)
@@ -918,7 +1047,17 @@ class CameraRecordService : Service() {
                         request: CaptureRequest,
                         failure: CaptureFailure
                     ) {
-                        Log.e(TAG, "❌ Capture failed: ${failure.reason}")
+                        // Ignore failures during teardown (expected when stopRepeating/abortCaptures is called)
+                        if (isStopping || !isRecording) return
+                        
+                        Log.e(TAG, "❌ Capture failed: reason=${failure.reason} frameNumber=${failure.frameNumber}")
+                        captureFailureCount++
+                        if (captureFailureCount > 10) {
+                            Log.e(TAG, "💥 Too many capture failures during active recording - stopping")
+                            scope.launch(Dispatchers.Main) {
+                                stopCameraRecording()
+                            }
+                        }
                     }
                 },
                 backgroundHandler
@@ -935,10 +1074,19 @@ class CameraRecordService : Service() {
     
     private fun stopCameraRecording() {
         if (!isRecording) {
-            Log.d(TAG, "Not recording")
+            Log.d(TAG, "Not recording - clearing state and stopping")
+            setRecordingActive(applicationContext, false)
+            stopForeground(true)
             stopSelf()
             return
         }
+        
+        // Prevent re-entry (capture failures during teardown can retrigger this)
+        if (isStopping) {
+            Log.d(TAG, "Already stopping - ignoring duplicate stop call")
+            return
+        }
+        isStopping = true
         
         stopRecordingJob?.cancel()
         stopRecordingJob = null
@@ -963,6 +1111,10 @@ class CameraRecordService : Service() {
         
         // Release camera resources but keep service alive for upload
         cleanupCameraOnly()
+        
+        // IMMEDIATELY mark recording as inactive so parent can trigger new recording
+        // (don't wait for upload to complete)
+        setRecordingActive(applicationContext, false)
         
         // Upload to Google Drive and save metadata using GlobalScope
         // CRITICAL: Use GlobalScope so the job survives service destruction
@@ -1005,6 +1157,8 @@ class CameraRecordService : Service() {
      */
     private fun cleanupCameraOnly() {
         isRecording = false
+        isStopping = false
+        captureFailureCount = 0
         stopRecordingJob?.cancel()
         stopRecordingJob = null
         
@@ -1028,8 +1182,18 @@ class CameraRecordService : Service() {
     
     private fun cleanup() {
         isRecording = false
+        isStopping = false
+        captureFailureCount = 0
         stopRecordingJob?.cancel()
         stopRecordingJob = null
+        
+        // Clean up in proper order: session -> camera -> recorder
+        try {
+            cameraCaptureSession?.stopRepeating()
+            cameraCaptureSession?.abortCaptures()
+        } catch (e: Exception) {
+            Log.d(TAG, "Session stop error (expected): ${e.message}")
+        }
         
         try {
             cameraCaptureSession?.close()
@@ -1042,9 +1206,18 @@ class CameraRecordService : Service() {
         cameraDevice = null
         
         try {
+            mediaRecorder?.stop()
+        } catch (e: Exception) {
+            // Stop may fail if not started, that's ok
+        }
+        
+        try {
+            mediaRecorder?.reset()
             mediaRecorder?.release()
         } catch (e: Exception) {}
         mediaRecorder = null
+        
+        Log.d(TAG, "🧹 All camera resources cleaned up")
     }
     
     private fun createOutputFile(): File {
@@ -1222,8 +1395,9 @@ class CameraRecordService : Service() {
             Log.e(TAG, "❌ Error in uploadAndSaveRecording: ${e.message}", e)
             e.printStackTrace()
         } finally {
-            // Always mark recording as inactive when done
+            // Ensure recording state is cleared even if upload fails
             setRecordingActive(applicationContext, false)
+            Log.d(TAG, "✅ Upload flow complete, recording state cleared")
         }
     }
     
@@ -1254,10 +1428,13 @@ class CameraRecordService : Service() {
     }
     
     override fun onDestroy() {
+        // Always clear recording state when service is destroyed
+        setRecordingActive(applicationContext, false)
         cleanup()
         stopBackgroundThread()
         scope.cancel()
         instance = null
+        Log.d(TAG, "🧹 CameraRecordService destroyed, all state cleared")
         super.onDestroy()
     }
 }

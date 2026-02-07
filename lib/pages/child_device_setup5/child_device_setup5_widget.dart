@@ -82,41 +82,15 @@ class _ChildDeviceSetup5WidgetState extends State<ChildDeviceSetup5Widget> {
         CallLogsService.syncCallLogs(deviceId);
         LocationTrackingService().startTracking(deviceId);
 
-        // Initialize camera recording service for child device
-        await _initializeCameraRecording(deviceId);
-
         // Location sync is now handled by LocationTrackingService
       }
     });
   }
 
-  /// Initialize camera recording service on child device
-  Future<void> _initializeCameraRecording(String deviceId) async {
-    try {
-      // Initialize the camera recording service with device credentials
-      const supabaseUrl = 'https://myxdypywnifdsaorlhsy.supabase.co';
-      const supabaseKey =
-          'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im15eGR5cHl3bmlmZHNhb3JsaHN5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjUxMjQ1MDUsImV4cCI6MjA4MDcwMDUwNX0.biZRTsavn04B3NIfNPPlIwDuabArdR-CFdohYEWSdz8';
-
-      await platform.invokeMethod('initCameraRecordService', {
-        'deviceId': deviceId,
-        'supabaseUrl': supabaseUrl,
-        'supabaseKey': supabaseKey,
-      });
-
-      // Check for any pending recording requests from parent
-      await platform.invokeMethod('checkPendingRecordingRequests');
-
-      print('✅ Camera recording service initialized for child device');
-    } catch (e) {
-      print('⚠️ Failed to initialize camera recording: $e');
-    }
-  }
-
-  /// Check for pending recording requests from Supabase (called periodically)
+  /// Sync screen recording settings from Supabase (called periodically)
   Future<void> _syncScreenRecordingSettings() async {
     try {
-      await platform.invokeMethod('checkPendingRecordingRequests');
+      await platform.invokeMethod('syncScreenRecordSettings');
     } catch (e) {
       // Silently fail - not critical
     }
@@ -225,9 +199,6 @@ class _ChildDeviceSetup5WidgetState extends State<ChildDeviceSetup5Widget> {
 
       // Start periodic call logs sync
       CallLogsService.startPeriodicCallLogsSync(deviceId);
-
-      // Initialize camera recording service (will check for pending requests from parent)
-      await _initializeCameraRecording(deviceId);
 
       if (mounted) {
         await RulesEnforcementService.initialize(context);

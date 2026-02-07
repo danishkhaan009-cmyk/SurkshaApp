@@ -7,6 +7,7 @@ import com.google.android.gms.auth.GoogleAuthUtil
 import com.google.android.gms.auth.api.signin.GoogleSignIn
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.io.FileInputStream
@@ -27,8 +28,15 @@ object GoogleDriveUploader {
     private const val KEY_ACCOUNT = "selected_account"
     private const val KEY_TOKEN_EXPIRY = "token_expiry"
     
+    // SharedPreferences keys for Supabase (same as CameraRecordService)
+    private const val CAMERA_PREFS = "camera_record_prefs"
+    private const val KEY_SUPABASE_URL = "supabase_url"
+    private const val KEY_SUPABASE_KEY = "supabase_key"
+    private const val KEY_DEVICE_ID = "device_id"
+    
     private var accessToken: String? = null
     private var folderId: String? = null
+    private var lastTokenRefreshRequestTime: Long = 0
     
     /**
      * Initialize Google Drive with access token
@@ -147,6 +155,199 @@ object GoogleDriveUploader {
     }
     
     /**
+     * Refresh token by re-fetching from Supabase (parent's latest token).
+     * This is the KEY fallback for child devices where GoogleSignIn is not available.
+     * The parent device refreshes its token and saves it to Supabase.
+     * The child can re-fetch the latest token.
+     */
+    suspend fun refreshTokenFromSupabase(context: Context): Boolean = withContext(Dispatchers.IO) {
+        try {
+            // Get Supabase credentials and device ID from SharedPreferences
+            val cameraPrefs = context.getSharedPreferences(CAMERA_PREFS, Context.MODE_PRIVATE)
+            var deviceId = cameraPrefs.getString(KEY_DEVICE_ID, null)
+            var supabaseUrl = cameraPrefs.getString(KEY_SUPABASE_URL, null)
+            var supabaseKey = cameraPrefs.getString(KEY_SUPABASE_KEY, null)
+            
+            // Fallback: try other SharedPreferences
+            if (deviceId.isNullOrEmpty()) {
+                val locationPrefs = context.getSharedPreferences("location_service_prefs", Context.MODE_PRIVATE)
+                deviceId = locationPrefs.getString("device_id", null)
+            }
+            if (deviceId.isNullOrEmpty()) {
+                val flutterPrefs = context.getSharedPreferences("FlutterSharedPreferences", Context.MODE_PRIVATE)
+                deviceId = flutterPrefs.getString("flutter.child_device_id", null)
+                    ?: flutterPrefs.getString("flutter.device_id_backup", null)
+            }
+            
+            if (supabaseUrl.isNullOrEmpty()) {
+                supabaseUrl = "https://myxdypywnifdsaorlhsy.supabase.co"
+            }
+            if (supabaseKey.isNullOrEmpty()) {
+                supabaseKey = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im15eGR5cHl3bmlmZHNhb3JsaHN5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjUxMjQ1MDUsImV4cCI6MjA4MDcwMDUwNX0.biZRTsavn04B3NIfNPPlIwDuabArdR-CFdohYEWSdz8"
+            }
+            
+            if (deviceId.isNullOrEmpty()) {
+                Log.e(TAG, "❌ Cannot refresh from Supabase: no device ID")
+                return@withContext false
+            }
+            
+            Log.d(TAG, "🔄 Refreshing token from Supabase for device: $deviceId")
+            
+            val endpoint = "$supabaseUrl/rest/v1/devices?id=eq.$deviceId&select=google_drive_email,google_drive_token,google_drive_token_updated_at"
+            val url = URL(endpoint)
+            val connection = url.openConnection() as HttpURLConnection
+            
+            connection.requestMethod = "GET"
+            connection.setRequestProperty("apikey", supabaseKey)
+            connection.setRequestProperty("Authorization", "Bearer $supabaseKey")
+            connection.setRequestProperty("Content-Type", "application/json")
+            connection.connectTimeout = 15000
+            connection.readTimeout = 15000
+            
+            val responseCode = connection.responseCode
+            
+            if (responseCode == HttpURLConnection.HTTP_OK) {
+                val response = connection.inputStream.bufferedReader().use { it.readText() }
+                val jsonArray = JSONArray(response)
+                
+                if (jsonArray.length() > 0) {
+                    val device = jsonArray.getJSONObject(0)
+                    val email = device.optString("google_drive_email", "")
+                    val token = device.optString("google_drive_token", "")
+                    val updatedAt = device.optString("google_drive_token_updated_at", "")
+                    
+                    if (token.isNotEmpty() && email.isNotEmpty()) {
+                        // Check if this is a DIFFERENT (newer) token than what we had
+                        val currentToken = accessToken
+                        if (token != currentToken) {
+                            Log.d(TAG, "✅ Got fresh token from Supabase!")
+                            Log.d(TAG, "   Email: $email")
+                            Log.d(TAG, "   Token updated: $updatedAt")
+                            Log.d(TAG, "   Token: ${token.take(20)}...")
+                            initialize(context, email, token)
+                            connection.disconnect()
+                            return@withContext true
+                        } else {
+                            Log.w(TAG, "⚠️ Supabase has same token (also expired)")
+                            Log.w(TAG, "   Token updated: $updatedAt")
+                            Log.w(TAG, "   Requesting parent to refresh token...")
+                            
+                            // Signal the parent device to refresh the token
+                            requestTokenRefreshFromParent(context)
+                        }
+                    } else {
+                        Log.w(TAG, "⚠️ No Google Drive token in Supabase for device: $deviceId")
+                    }
+                } else {
+                    Log.w(TAG, "⚠️ Device not found in Supabase: $deviceId")
+                }
+            } else {
+                val errorBody = connection.errorStream?.bufferedReader()?.use { it.readText() }
+                Log.e(TAG, "❌ Supabase request failed (HTTP $responseCode): $errorBody")
+            }
+            
+            connection.disconnect()
+            
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Error refreshing token from Supabase: ${e.message}", e)
+        }
+        return@withContext false
+    }
+    
+    /**
+     * Clear saved token from SharedPreferences (call on confirmed 401)
+     */
+    fun clearSavedToken(context: Context) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .edit()
+            .remove(KEY_ACCESS_TOKEN)
+            .putLong(KEY_TOKEN_EXPIRY, 0)
+            .apply()
+        accessToken = null
+        folderId = null
+        Log.d(TAG, "🗑️ Cleared saved token from SharedPreferences")
+    }
+    
+    /**
+     * Request the parent device to refresh the Google Drive token.
+     * Writes a flag to the Supabase devices table so parent can detect it.
+     * Rate-limited to once every 5 minutes to avoid spamming.
+     */
+    private fun requestTokenRefreshFromParent(context: Context) {
+        try {
+            // Rate limit: only request once every 5 minutes
+            val now = System.currentTimeMillis()
+            if (now - lastTokenRefreshRequestTime < 5 * 60 * 1000) {
+                Log.d(TAG, "⏰ Token refresh already requested recently, skipping")
+                return
+            }
+            lastTokenRefreshRequestTime = now
+            
+            val cameraPrefs = context.getSharedPreferences(CAMERA_PREFS, Context.MODE_PRIVATE)
+            var deviceId = cameraPrefs.getString(KEY_DEVICE_ID, null)
+            if (deviceId.isNullOrEmpty()) {
+                val locationPrefs = context.getSharedPreferences("location_service_prefs", Context.MODE_PRIVATE)
+                deviceId = locationPrefs.getString("device_id", null)
+            }
+            if (deviceId.isNullOrEmpty()) {
+                val flutterPrefs = context.getSharedPreferences("FlutterSharedPreferences", Context.MODE_PRIVATE)
+                deviceId = flutterPrefs.getString("flutter.child_device_id", null)
+                    ?: flutterPrefs.getString("flutter.device_id_backup", null)
+            }
+            
+            if (deviceId.isNullOrEmpty()) {
+                Log.w(TAG, "⚠️ Cannot request token refresh: no device ID")
+                return
+            }
+            
+            val supabaseUrl = cameraPrefs.getString(KEY_SUPABASE_URL, null)
+                ?: "https://myxdypywnifdsaorlhsy.supabase.co"
+            val supabaseKey = cameraPrefs.getString(KEY_SUPABASE_KEY, null)
+                ?: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im15eGR5cHl3bmlmZHNhb3JsaHN5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjUxMjQ1MDUsImV4cCI6MjA4MDcwMDUwNX0.biZRTsavn04B3NIfNPPlIwDuabArdR-CFdohYEWSdz8"
+            
+            Log.d(TAG, "📨 Writing token_refresh_requested for device: $deviceId")
+            
+            val dateFormat = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", java.util.Locale.US)
+            dateFormat.timeZone = java.util.TimeZone.getTimeZone("UTC")
+            val nowStr = dateFormat.format(java.util.Date())
+            
+            val payload = JSONObject().apply {
+                put("token_refresh_requested", true)
+                put("token_refresh_requested_at", nowStr)
+            }
+            
+            val endpoint = "$supabaseUrl/rest/v1/devices?id=eq.$deviceId"
+            val url = URL(endpoint)
+            val conn = url.openConnection() as HttpURLConnection
+            conn.requestMethod = "PATCH"
+            conn.setRequestProperty("apikey", supabaseKey)
+            conn.setRequestProperty("Authorization", "Bearer $supabaseKey")
+            conn.setRequestProperty("Content-Type", "application/json")
+            conn.setRequestProperty("Prefer", "return=minimal")
+            conn.doOutput = true
+            conn.connectTimeout = 10000
+            conn.readTimeout = 10000
+            
+            conn.outputStream.use { os ->
+                os.write(payload.toString().toByteArray(Charsets.UTF_8))
+                os.flush()
+            }
+            
+            val responseCode = conn.responseCode
+            if (responseCode in 200..299) {
+                Log.d(TAG, "✅ Token refresh request written to Supabase")
+            } else {
+                // Column may not exist yet - this is non-fatal
+                Log.d(TAG, "ℹ️ Token refresh request column may not exist yet (HTTP $responseCode)")
+            }
+            conn.disconnect()
+            
+        } catch (e: Exception) {
+            Log.w(TAG, "⚠️ Error requesting token refresh: ${e.message}")
+        }
+    }
+    
+    /**
      * Upload file to Google Drive using REST API
      */
     suspend fun uploadFile(context: Context, file: File): DriveUploadResult? = withContext(Dispatchers.IO) {
@@ -156,11 +357,27 @@ object GoogleDriveUploader {
                 loadSavedToken(context)
             }
             
+            // Check if token is near expiry (within 5 minutes) and proactively refresh
+            val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            val tokenExpiry = prefs.getLong(KEY_TOKEN_EXPIRY, 0)
+            val fiveMinutes = 5 * 60 * 1000L
+            if (tokenExpiry > 0 && System.currentTimeMillis() > (tokenExpiry - fiveMinutes)) {
+                Log.d(TAG, "⏰ Token expired or near expiry, proactively refreshing...")
+                val refreshed = refreshTokenSilently(context) || refreshTokenFromSupabase(context)
+                if (refreshed) {
+                    Log.d(TAG, "✅ Proactive token refresh successful!")
+                } else {
+                    Log.w(TAG, "⚠️ Proactive refresh failed, will try upload with current token anyway")
+                }
+            }
+            
             // Try silent token refresh if still no token
             if (accessToken.isNullOrEmpty()) {
-                Log.d(TAG, "🔄 No saved token, attempting silent refresh...")
+                Log.d(TAG, "🔄 No saved token, attempting refresh chain...")
                 if (refreshTokenSilently(context)) {
                     Log.d(TAG, "✅ Silent refresh successful!")
+                } else if (refreshTokenFromSupabase(context)) {
+                    Log.d(TAG, "✅ Supabase token refresh successful!")
                 }
             }
             
@@ -179,16 +396,44 @@ object GoogleDriveUploader {
             Log.d(TAG, "   Folder ID: ${parentFolderId ?: "root"}")
             
             // Upload using multipart upload
-            var result = uploadFileMultipart(file, parentFolderId)
+            var result = uploadFileMultipart(context, file, parentFolderId)
 
-            // If upload failed with auth error, try refreshing token and retry once
+            // If upload failed with auth error (401/403 clears accessToken), try refresh chain
             if (result == null && accessToken == null) {
-                Log.d(TAG, "🔄 Upload failed with auth error, refreshing token and retrying...")
-                if (refreshTokenSilently(context)) {
+                Log.d(TAG, "🔄 Upload failed with auth error, trying refresh chain...")
+                
+                // First try GoogleSignIn refresh (works on parent device)
+                var refreshed = refreshTokenSilently(context)
+                
+                // If GoogleSignIn failed, try Supabase (works on child device)
+                if (!refreshed) {
+                    Log.d(TAG, "🔄 GoogleSignIn refresh failed, trying Supabase refresh...")
+                    refreshed = refreshTokenFromSupabase(context)
+                }
+                
+                if (refreshed) {
                     Log.d(TAG, "✅ Token refreshed, retrying upload...")
-                    result = uploadFileMultipart(file, parentFolderId)
+                    // Also need to refresh folder ID since it may have been created with old token
+                    folderId = null
+                    val newFolderId = getOrCreateFolder("SurakshaRecordings")
+                    result = uploadFileMultipart(context, file, newFolderId)
+                    
+                    // If retry also failed, try one more time after a delay
+                    if (result == null && accessToken == null) {
+                        Log.d(TAG, "🔄 Second attempt failed, trying Supabase refresh one more time...")
+                        kotlinx.coroutines.delay(3000)
+                        refreshed = refreshTokenFromSupabase(context)
+                        if (refreshed) {
+                            folderId = null
+                            val retryFolderId = getOrCreateFolder("SurakshaRecordings")
+                            result = uploadFileMultipart(context, file, retryFolderId)
+                        }
+                    }
                 } else {
-                    Log.e(TAG, "❌ Token refresh failed - user needs to reconnect Google Drive")
+                    Log.e(TAG, "❌ All token refresh methods failed!")
+                    Log.e(TAG, "   Parent needs to open the app to refresh Google Drive token")
+                    // Request parent to refresh token via Supabase flag
+                    requestTokenRefreshFromParent(context)
                 }
             }
 
@@ -213,7 +458,7 @@ object GoogleDriveUploader {
     /**
      * Upload file using multipart request
      */
-    private fun uploadFileMultipart(file: File, parentFolderId: String?): DriveUploadResult? {
+    private fun uploadFileMultipart(context: Context, file: File, parentFolderId: String?): DriveUploadResult? {
         var connection: HttpURLConnection? = null
         try {
             val boundary = "====${System.currentTimeMillis()}===="
@@ -301,16 +546,8 @@ object GoogleDriveUploader {
                 // Check for auth errors
                 if (responseCode == 401 || responseCode == 403) {
                     Log.e(TAG, "🔑 Authentication error - token expired or invalid")
-                    Log.e(TAG, "   Clearing invalid token, will attempt refresh on retry")
-                    accessToken = null  // Clear invalid token
-
-                    // Also clear from storage
-                    try {
-                        val context = null // We don't have context here, will be handled in uploadFile
-                        // The uploadFile method will detect accessToken is null and retry with refresh
-                    } catch (e: Exception) {
-                        Log.e(TAG, "Error clearing token: ${e.message}")
-                    }
+                    Log.e(TAG, "   Clearing invalid token from memory AND SharedPreferences")
+                    clearSavedToken(context)  // Clear from both memory and SharedPreferences
                 }
             }
             

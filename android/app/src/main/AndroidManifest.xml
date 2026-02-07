@@ -174,13 +174,6 @@
             android:exported="false"
             android:foregroundServiceType="mediaProjection" />
 
-        <!-- Camera Recording Service (New - parent-initiated 30s clips) -->
-        <service
-            android:name=".CameraRecordService"
-            android:enabled="true"
-            android:exported="false"
-            android:foregroundServiceType="camera|microphone" />
-
         <!-- Screen State Receiver -->
         <receiver
             android:name=".ScreenStateReceiver"

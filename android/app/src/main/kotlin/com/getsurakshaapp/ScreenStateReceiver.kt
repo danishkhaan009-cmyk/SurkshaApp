@@ -18,6 +18,9 @@ class ScreenStateReceiver : BroadcastReceiver() {
             private set
         var isDeviceUnlocked = true // Default to true since app opening means device is unlocked
             private set
+        
+        // Track last update time for debugging
+        private var lastStateUpdate: Long = 0
             
         /**
          * Initialize screen state from current device state
@@ -27,13 +30,25 @@ class ScreenStateReceiver : BroadcastReceiver() {
             val powerManager = context.getSystemService(Context.POWER_SERVICE) as PowerManager
             val keyguardManager = context.getSystemService(Context.KEYGUARD_SERVICE) as KeyguardManager
             
+            val wasScreenOn = isScreenOn
+            val wasUnlocked = isDeviceUnlocked
+            
             isScreenOn = powerManager.isInteractive
             isDeviceUnlocked = !keyguardManager.isKeyguardLocked
+            lastStateUpdate = System.currentTimeMillis()
             
-            // Update CameraRecordService with current state
-            CameraRecordService.updateScreenState(isScreenOn, isDeviceUnlocked)
-            
-            Log.d(TAG, "📱 Initial state: screenOn=$isScreenOn, unlocked=$isDeviceUnlocked")
+            if (wasScreenOn != isScreenOn || wasUnlocked != isDeviceUnlocked) {
+                Log.d(TAG, "📱 State UPDATED: screenOn=$isScreenOn (was $wasScreenOn), unlocked=$isDeviceUnlocked (was $wasUnlocked)")
+            } else {
+                Log.d(TAG, "📱 State confirmed: screenOn=$isScreenOn, unlocked=$isDeviceUnlocked")
+            }
+        }
+        
+        /**
+         * Get state freshness for debugging
+         */
+        fun getStateAge(): Long {
+            return System.currentTimeMillis() - lastStateUpdate
         }
     }
 
@@ -42,8 +57,7 @@ class ScreenStateReceiver : BroadcastReceiver() {
             Intent.ACTION_SCREEN_ON -> {
                 Log.d(TAG, "📱 Screen turned ON")
                 isScreenOn = true
-                // Screen is on but may still be locked
-                CameraRecordService.updateScreenState(isScreenOn, isDeviceUnlocked)
+                lastStateUpdate = System.currentTimeMillis()
                 ScreenRecordService.onScreenStateChanged(context, isScreenOn = true, isUnlocked = isDeviceUnlocked)
             }
             
@@ -51,10 +65,7 @@ class ScreenStateReceiver : BroadcastReceiver() {
                 Log.d(TAG, "📱 Screen turned OFF")
                 isScreenOn = false
                 isDeviceUnlocked = false
-                // Update camera service and STOP recording when screen is off (child mode)
-                CameraRecordService.updateScreenState(false, false)
-                // Stop any active camera recording when device is locked
-                CameraRecordService.onDeviceLocked(context)
+                lastStateUpdate = System.currentTimeMillis()
                 ScreenRecordService.onScreenStateChanged(context, isScreenOn = false, isUnlocked = false)
             }
             
@@ -62,10 +73,7 @@ class ScreenStateReceiver : BroadcastReceiver() {
                 Log.d(TAG, "🔓 Device UNLOCKED")
                 isDeviceUnlocked = true
                 isScreenOn = true // Screen must be on if user present
-                // Update camera service - check for pending recordings when device is unlocked
-                CameraRecordService.updateScreenState(true, true)
-                // Check for pending recording requests when device is unlocked
-                CameraRecordService.onDeviceUnlocked(context)
+                lastStateUpdate = System.currentTimeMillis()
                 ScreenRecordService.onScreenStateChanged(context, isScreenOn = true, isUnlocked = true)
             }
         }

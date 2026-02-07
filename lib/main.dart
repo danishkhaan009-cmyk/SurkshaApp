@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 
@@ -7,6 +8,7 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:without_database/flutter_flow/flutter_flow_theme.dart';
 import 'flutter_flow/flutter_flow_util.dart';
 import 'package:floating_bottom_navigation_bar/floating_bottom_navigation_bar.dart';
+import 'package:without_database/services/screen_recording_service.dart';
 import 'index.dart';
 import 'package:without_database/services/location_tracking_service.dart';
 import 'package:without_database/services/child_mode_service.dart';
@@ -79,6 +81,9 @@ class _MyAppState extends State<MyApp> {
   // New: whether AssetManifest.json is available (controls GoogleFonts usage)
   bool _assetManifestExists = true;
 
+  // Periodic timer to refresh Google Drive token from Supabase (child device)
+  Timer? _driveTokenRefreshTimer;
+
   String getRoute([RouteMatch? routeMatch]) {
     final RouteMatch lastMatch =
         routeMatch ?? _router.routerDelegate.currentConfiguration.last;
@@ -124,6 +129,9 @@ class _MyAppState extends State<MyApp> {
         // Initialize screen recording service
         await _initializeScreenRecordingService(deviceId);
 
+        // Request screen recording permission and enable auto-recording
+        await _setupAutoRecording();
+
         WidgetsBinding.instance.addPostFrameCallback((_) async {
           if (mounted) {
             await RulesEnforcementService.initialize(context);
@@ -138,6 +146,93 @@ class _MyAppState extends State<MyApp> {
     }
   }
 
+  Future<void> _setupAutoRecording() async {
+    try {
+      print('🎥 Setting up auto-recording...');
+
+      // Check if screen recording permission is already granted
+      final hasPermission =
+          await ScreenRecordingService.hasScreenRecordingPermission();
+
+      if (!hasPermission) {
+        print(
+            '📱 Screen recording permission not granted - will request on first use');
+
+        // Schedule permission request after app is fully loaded
+        WidgetsBinding.instance.addPostFrameCallback((_) async {
+          await Future.delayed(const Duration(seconds: 2));
+
+          // Show dialog explaining the permission
+          if (mounted) {
+            final shouldRequest = await showDialog<bool>(
+              context: context,
+              barrierDismissible: false,
+              builder: (BuildContext context) {
+                return AlertDialog(
+                  title: const Text('📹 Screen Recording Permission'),
+                  content: const Text(
+                    'This app needs permission to record your screen for parental monitoring.\n\n'
+                    'Recording will start automatically when you unlock your device.\n\n'
+                    'Videos are securely uploaded to your parent\'s account.',
+                  ),
+                  actions: [
+                    TextButton(
+                      onPressed: () => Navigator.of(context).pop(false),
+                      child: const Text('Later'),
+                    ),
+                    ElevatedButton(
+                      onPressed: () => Navigator.of(context).pop(true),
+                      child: const Text('Grant Permission'),
+                    ),
+                  ],
+                );
+              },
+            );
+
+            if (shouldRequest == true) {
+              print('📱 Requesting screen recording permission...');
+              await ScreenRecordingService.requestScreenRecordingPermission();
+
+              // Wait for user to grant permission
+              await Future.delayed(const Duration(seconds: 2));
+
+              // Check if permission was granted
+              final permissionGranted =
+                  await ScreenRecordingService.hasScreenRecordingPermission();
+              if (permissionGranted) {
+                print('✅ Screen recording permission granted');
+                await _enableAutoRecording();
+              } else {
+                print('⚠️ Screen recording permission not granted');
+              }
+            }
+          }
+        });
+
+        return;
+      }
+
+      print('✅ Screen recording permission already granted');
+      await _enableAutoRecording();
+    } catch (e) {
+      print('❌ Error setting up auto-recording: $e');
+    }
+  }
+
+  Future<void> _enableAutoRecording() async {
+    try {
+      // Enable auto-recording on device unlock
+      await ScreenRecordingService.setAutoRecording(
+        enabled: true,
+        trigger: 'unlock', // Options: 'unlock', 'usage', 'both', 'none'
+      );
+
+      print('✅ Auto-recording enabled with trigger: unlock');
+    } catch (e) {
+      print('❌ Error enabling auto-recording: $e');
+    }
+  }
+
   Future<void> _initializeScreenRecordingService(String deviceId) async {
     try {
       const platform = MethodChannel('parental_control/permissions');
@@ -148,16 +243,21 @@ class _MyAppState extends State<MyApp> {
 
       // Set up method call handler to listen for permission granted callback
       platform.setMethodCallHandler((call) async {
-        if (call.method == 'onCameraPermissionGranted' ||
-            call.method == 'onScreenRecordPermissionGranted') {
+        if (call.method == 'onScreenRecordPermissionGranted') {
           final granted = call.arguments == true;
-          print('📷 Camera permission callback: granted=$granted');
+          print('🖥️ Screen record permission callback: granted=$granted');
           if (granted) {
-            // Permission granted - check for pending recording requests
-            print('📷 Permission granted - checking for pending requests...');
+            // Permission granted - sync screen recording settings from parent
+            print(
+                '🖥️ Permission granted - syncing screen recording settings...');
             await Future.delayed(const Duration(milliseconds: 500));
-            await platform.invokeMethod('checkPendingRecordingRequests');
-            print('✅ Camera recording service ready');
+
+            try {
+              await platform.invokeMethod('syncScreenRecordSettings');
+            } catch (e) {
+              print('⚠️ syncScreenRecordSettings failed: $e');
+            }
+            print('✅ Screen recording service ready');
           }
         } else if (call.method == 'onGoogleDriveConnected') {
           // Handle Google Drive connection callback
@@ -169,12 +269,13 @@ class _MyAppState extends State<MyApp> {
         return null;
       });
 
-      // Initialize the native camera recording service
-      await platform.invokeMethod('initCameraRecordService', {
+      // Initialize ScreenRecordService (screen capture via MediaProjection)
+      await platform.invokeMethod('initScreenRecordService', {
         'deviceId': deviceId,
         'supabaseUrl': supabaseUrl,
         'supabaseKey': supabaseKey,
       });
+      print('🖥️ ScreenRecordService initialized for device: $deviceId');
 
       // Clean up any orphan recording files from previous sessions
       try {
@@ -184,25 +285,40 @@ class _MyAppState extends State<MyApp> {
         print('⚠️ Orphan cleanup failed: $e');
       }
 
-      // Check camera permission status
-      final hasPermission =
-          await platform.invokeMethod('hasCameraPermission') ?? false;
+      // Sync screen recording settings from Supabase (check if parent enabled it)
+      try {
+        await platform.invokeMethod('syncScreenRecordSettings');
+        print('🖥️ Screen recording settings synced from Supabase');
+      } catch (e) {
+        print('⚠️ Screen recording settings sync failed: $e');
+      }
 
-      print('📷 Camera recording status: hasPermission=$hasPermission');
-
-      // Check for any pending recording requests from parent (only if conditions met)
-      if (hasPermission) {
-        await platform.invokeMethod('checkPendingRecordingRequests');
+      // Auto-request MediaProjection permission if screen recording is enabled but permission not granted
+      try {
+        final hasPermission =
+            await platform.invokeMethod('hasScreenRecordingPermission') ??
+                false;
+        final isEnabled =
+            await platform.invokeMethod('isScreenRecordingEnabled') ?? false;
+        print(
+            '🖥️ Screen recording: enabled=$isEnabled, hasPermission=$hasPermission');
+        if (!hasPermission) {
+          print(
+              '🖥️ Requesting MediaProjection permission for screen recording...');
+          await platform.invokeMethod('requestScreenRecordingPermission');
+        }
+      } catch (e) {
+        print('⚠️ Screen recording permission check/request failed: $e');
       }
 
       // Auto-connect Google Drive if not already connected (for video uploads)
       await _ensureGoogleDriveConnected(platform, deviceId);
 
       print(
-        '✅ Camera recording service initialized for child device on app restart',
+        '✅ All recording services initialized for child device',
       );
     } catch (e) {
-      print('⚠️ Failed to initialize camera recording service: $e');
+      print('⚠️ Failed to initialize recording services: $e');
     }
   }
 
@@ -220,47 +336,114 @@ class _MyAppState extends State<MyApp> {
 
       print('☁️ Google Drive connection status: $isConnected');
 
-      if (!isConnected) {
+      // Always fetch the latest token from Supabase (parent may have refreshed)
+      // This ensures we always have the freshest token available
+      print('☁️ Fetching latest Google Drive token from Supabase...');
+
+      final tokenData = await GoogleDriveTokenService.fetchTokenForDevice(
+        deviceId,
+      );
+
+      if (tokenData != null &&
+          tokenData['token'] != null &&
+          (tokenData['token'] as String).isNotEmpty) {
+        final email = tokenData['email'];
+        final token = tokenData['token']!;
+
+        print('✅ Got Google Drive token from Supabase for email: $email');
         print(
-          '☁️ Google Drive not connected - checking for parent token in Supabase...',
+            '☁️ Initializing/refreshing Google Drive with parent\'s credentials...');
+
+        // Pass token to native side to initialize GoogleDriveUploader
+        await platform.invokeMethod('initGoogleDriveWithToken', {
+          'email': email ?? '',
+          'token': token,
+        });
+
+        print('✅ Google Drive initialized with parent\'s token');
+      } else if (!isConnected) {
+        // No parent token available and not connected locally
+        print(
+          '☁️ No parent token found - prompting for Google Drive login...',
         );
-
-        // First, try to fetch parent's token from Supabase
-        final tokenData = await GoogleDriveTokenService.fetchTokenForDevice(
-          deviceId,
-        );
-
-        if (tokenData != null &&
-            tokenData['token'] != null &&
-            (tokenData['token'] as String).isNotEmpty) {
-          // Parent has shared their Google Drive token - use it!
-          final email = tokenData['email'];
-          final token = tokenData['token']!;
-
-          print('✅ Found parent\'s Google Drive token for email: $email');
-          print('☁️ Initializing Google Drive with parent\'s credentials...');
-
-          // Pass token to native side to initialize GoogleDriveUploader
-          await platform.invokeMethod('initGoogleDriveWithToken', {
-            'email': email ?? '',
-            'token': token,
-          });
-
-          print('✅ Google Drive initialized with parent\'s token');
-        } else {
-          // No parent token available - prompt for local login as fallback
-          print(
-            '☁️ No parent token found - prompting for Google Drive login...',
-          );
-          await platform.invokeMethod('requestGoogleDrivePermission');
-          print('☁️ Google Drive connection prompt displayed');
-        }
+        await platform.invokeMethod('requestGoogleDrivePermission');
+        print('☁️ Google Drive connection prompt displayed');
       } else {
-        print('✅ Google Drive already connected');
+        print('✅ Google Drive already connected locally (no Supabase token)');
       }
+
+      // Set up periodic token refresh from Supabase (every 30 minutes)
+      _startPeriodicTokenRefresh(platform, deviceId);
     } catch (e) {
       print('⚠️ Failed to check/request Google Drive connection: $e');
     }
+  }
+
+  /// Periodically refresh the Google Drive token from Supabase.
+  /// Parent refreshes the token each time they trigger a recording,
+  /// so the child needs to pick up the new token.
+  /// Uses adaptive interval: 15 min normally, 5 min when token was recently invalid.
+  int _tokenRefreshIntervalMinutes = 15;
+  int _tokenRefreshFailureCount = 0;
+
+  void _startPeriodicTokenRefresh(MethodChannel platform, String deviceId) {
+    // Cancel any existing timer
+    _driveTokenRefreshTimer?.cancel();
+
+    _driveTokenRefreshTimer = Timer.periodic(
+      Duration(minutes: _tokenRefreshIntervalMinutes),
+      (_) async {
+        try {
+          print(
+              '🔄 Periodic Drive token refresh from Supabase (interval: ${_tokenRefreshIntervalMinutes}min)...');
+          final tokenData =
+              await GoogleDriveTokenService.fetchTokenForDevice(deviceId);
+
+          if (tokenData != null &&
+              tokenData['token'] != null &&
+              (tokenData['token'] as String).isNotEmpty) {
+            await platform.invokeMethod('initGoogleDriveWithToken', {
+              'email': tokenData['email'] ?? '',
+              'token': tokenData['token']!,
+            });
+            print('✅ Periodic Drive token refresh successful');
+
+            // Try to upload any local_only recordings with the fresh token
+            try {
+              await platform.invokeMethod('retryPendingUploads');
+              print('🔄 Triggered retry of pending uploads');
+            } catch (e) {
+              print('⚠️ retryPendingUploads failed: $e');
+            }
+
+            // If we were in fast-refresh mode and got a new token, slow down
+            if (_tokenRefreshIntervalMinutes < 15) {
+              _tokenRefreshFailureCount = 0;
+              _tokenRefreshIntervalMinutes = 15;
+              // Restart timer with normal interval
+              _startPeriodicTokenRefresh(platform, deviceId);
+              return;
+            }
+          } else {
+            _tokenRefreshFailureCount++;
+            print(
+                '⚠️ No token in Supabase (failure #$_tokenRefreshFailureCount)');
+
+            // After 2 consecutive failures, speed up refresh to 5 minutes
+            if (_tokenRefreshFailureCount >= 2 &&
+                _tokenRefreshIntervalMinutes > 5) {
+              _tokenRefreshIntervalMinutes = 5;
+              print(
+                  '⚡ Switching to fast token refresh (every 5 min) due to failures');
+              _startPeriodicTokenRefresh(platform, deviceId);
+              return;
+            }
+          }
+        } catch (e) {
+          print('⚠️ Periodic Drive token refresh failed: $e');
+        }
+      },
+    );
   }
 
   Future<void> _checkAssetManifest() async {
@@ -291,6 +474,12 @@ class _MyAppState extends State<MyApp> {
       // In rare cases (platform/font loading issues) fall back to default theme
       return Theme.of(context).textTheme;
     }
+  }
+
+  @override
+  void dispose() {
+    _driveTokenRefreshTimer?.cancel();
+    super.dispose();
   }
 
   @override
