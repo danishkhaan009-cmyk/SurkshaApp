@@ -1,0 +1,69 @@
+allprojects {
+    repositories {
+        google()
+        mavenCentral()
+        // Fallback for legacy dependencies
+        maven { url 'https://maven.google.com' }
+    }
+}
+
+rootProject.buildDir = '../build'
+
+subprojects {
+    afterEvaluate { project ->
+        if (project.hasProperty("kotlin")) {
+            project.tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).all {
+                kotlinOptions {
+                    jvmTarget = "1.8"
+                }
+            }
+        }
+
+        // Force all plugins to use compatible SDK versions
+        if (project.hasProperty("android")) {
+            project.android {
+                compileSdkVersion 36
+
+                defaultConfig {
+                    minSdkVersion 23
+                    targetSdkVersion 36
+                }
+            }
+        }
+    }
+}
+
+// Fix for call_log package - apply the Android library plugin before configuring
+subprojects { sub ->
+    sub.afterEvaluate {
+        if (sub.plugins.hasPlugin("com.android.library")) {
+            sub.android {
+                if (sub.android.namespace == null) {
+                    if (sub.name == 'call_log') {
+                        sub.android.namespace = 'sk.fourq.calllog'
+                    }
+                    if (sub.name == 'device_apps') {
+                        sub.android.namespace = 'fr.g123k.deviceapps'
+                    }
+                    if (sub.name == 'geolocator_android') {
+                        sub.android.namespace = 'com.baseflow.geolocator'
+                    }
+                    if (sub.name == 'permission_handler_android') {
+                        sub.android.namespace = 'com.baseflow.permissionhandler'
+                    }
+                }
+            }
+        }
+    }
+}
+
+subprojects {
+    project.buildDir = "${rootProject.buildDir}/${project.name}"
+}
+subprojects {
+    project.evaluationDependsOn(':app')
+}
+
+tasks.register("clean", Delete) {
+    delete rootProject.layout.buildDirectory
+}
